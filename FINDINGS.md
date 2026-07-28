@@ -442,3 +442,34 @@ The graph stored `path` and `range` but no source, so nothing could render a bef
 
 11 new tests, run against a real two-commit git repo rather than a stub, so retrieval is exercised
 the way it runs in production.
+
+## Reload fidelity (6b.4, 6b.5) — the cache must not quietly disagree with a fresh run
+
+Persisting the graph exposed two ways a cached run could differ from the run that produced it.
+
+**Lost caller lists.** Schema v1 stored callers only inside `break_json`, which exists solely for
+contract-changed nodes. On `sedai-simulation-server#244` that is 11 of 22 nodes with callers, so
+**half the caller lists vanished on reload** — and inline call-site excerpts (8.5) need them for
+every node. Schema v2 persists node caller lists, test-coverage flags, severity, and the parsed
+symbol range so before/after source is locatable without re-parsing.
+
+**Lost disclosures — the more serious one.** The blast-radius summary was not persisted, so a
+cache-served run omitted the truncation warnings. A graph *known to be incomplete* would have been
+re-presented as complete. That is exactly the failure the truncation disclosure exists to prevent,
+reintroduced through the cache — and invisible, because the cached run simply printed less.
+
+Schema v3 persists the graph's own summary: blast-radius bounds, truncations, resolution health,
+changed-line source, processor status. Cold and warm runs are now verified to emit identical
+disclosures:
+
+```
+warm: health clean · blast radius 63 context nodes at depth ≤ 2 · d1 41 · d2 22
+cold: health clean · blast radius 63 context nodes at depth ≤ 2 · d1 41 · d2 22
+PARITY
+```
+
+Cache payoff, same PR: **34s cold → 1s warm**, 107 nodes and 226 edges restored intact.
+
+Five new store tests, including a field-for-field equality assertion between a saved graph and its
+reload. A caching layer that silently drops fields is worse than no cache, because the UI would
+render a different graph than the CLI reported and nothing would flag the difference.

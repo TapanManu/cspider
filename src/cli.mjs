@@ -17,7 +17,7 @@ import { JavaResolver, jdtlsAvailable } from './java/resolve.mjs';
 import { buildGraph, scoreRisk, coChangedEdges, topologicalOrder, expandBlastRadius } from './graph/build.mjs';
 import { changedLines, filesWithoutPatch } from './ingest/changedLines.mjs';
 import { openDb } from './store/db.mjs';
-import { saveAnalysis, loadReviewed, markReviewed, unmarkReviewed, progress, contentHash } from './store/persist.mjs';
+import { saveAnalysis, loadReviewed, markReviewed, unmarkReviewed, loadGraph, loadGraphMeta, progress } from './store/persist.mjs';
 import { scanCache, evictionPlan, applyEviction, humanBytes } from './store/retention.mjs';
 import { ensureWorktree } from './ingest/pr.mjs';
 
@@ -76,6 +76,7 @@ options:
   --by-severity     order by provisional severity instead of file/containment
   --show-noise      include suppressed low-signal units
   --resolve         resolve callers and run break analysis (starts jdtls; slower)
+  --no-cache        ignore any cached graph for this head SHA and re-resolve
   --no-base         skip base-image resolution (removed members stay UNKNOWN, faster)
   --topo            order by callers-before-callees instead of file/containment
   --depth N         blast-radius depth (default 2, 0 disables expansion)
@@ -241,6 +242,26 @@ if (has('resolve')) {
     process.exit(1);
   }
   for (const a of analyses) {
+    // A graph cached for this exact head SHA is content-addressed, so reusing it is safe — and
+    // it is the difference between seconds and minutes on a monorepo.
+    if (!has('no-cache')) {
+      const cached = loadGraph(db, a.prId, a.meta.headRefOid);
+      if (cached) {
+        a.graph = cached;
+        a.fromGraphCache = true;
+        // Restore the disclosures too, or a cached run would present an incomplete graph as complete.
+        const gm = loadGraphMeta(db, a.prId, a.meta.headRefOid);
+        if (gm) {
+          a.graph.blastRadius = gm.blastRadius;
+          a.graph.truncations = gm.truncations ?? [];
+          a.health = gm.health;
+          a.touchedSource = gm.touchedSource;
+          a.processor = gm.processor;
+        }
+        process.stderr.write(C.dim(`${a.key}: graph from cache (${cached.nodes.size} nodes, ${cached.edges.length} edges)\n`));
+        continue;
+      }
+    }
     const root = join(CACHE, 'worktrees',
       `${a.pr.nwo.replace('/', '__')}@${a.meta.headRefOid.slice(0, 12)}`);
     const projectRoot = a.buildRoots.primary === '.' ? root : join(root, a.buildRoots.primary);
@@ -462,6 +483,9 @@ for (const a of analyses) {
         console.log(C.yellow(`   ⚠ query budget exhausted at ${shortFqn(t2.fqn)}`));
       }
     }
+  }
+  if (a.fromGraphCache) {
+    console.log(C.dim('   graph served from cache for this head SHA — pass --no-cache to re-resolve'));
   }
   const br = a.graph?.blastRadius;
   if (br) {

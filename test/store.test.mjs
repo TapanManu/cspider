@@ -1,7 +1,7 @@
 // Persistence and retention (tasks 1.3, 1.4, 1.5, 6.11).
 import { openDb } from '../src/store/db.mjs';
-import { saveAnalysis, loadReviewed, markReviewed, unmarkReviewed, loadGraph, progress, contentHash }
-  from '../src/store/persist.mjs';
+import { saveAnalysis, loadReviewed, markReviewed, unmarkReviewed, loadGraph, loadUnits,
+  progress, contentHash } from '../src/store/persist.mjs';
 import { scanCache, evictionPlan, applyEviction, POLICY, humanBytes } from '../src/store/retention.mjs';
 import { parseSymbols } from '../src/java/parse.mjs';
 import { diffSymbols, classifyNoise } from '../src/java/diff.mjs';
@@ -158,6 +158,122 @@ t('re-saving the same head replaces rather than duplicating', () => {
   const n = db.prepare('SELECT COUNT(*) c FROM change_units WHERE pr_id=? AND head_sha=?')
     .get(PR, 'head1').c;
   assert.equal(n, units.length);
+});
+
+console.log('\nstore — reload fidelity (6b.4)');
+// The point of caching a graph is that a reload must be indistinguishable from a fresh build.
+// If it silently loses caller lists or edge endpoints, the UI renders a different graph than the
+// CLI reported, and nobody would notice.
+const richAnalysis = () => {
+  const units = unitsOf('void f(String s) { g(1); }', 'void f(String s, int n) { g(2); }');
+  const nodes = new Map();
+  for (const u of units) {
+    nodes.set(u.id, {
+      id: u.id, fqn: u.fqn, kind: u.kind, path: u.path, origin: 'CHANGED',
+      changeKind: u.changeKind, depth: null,
+      severity: u.severity,
+      risk: { total: 45, components: [{ name: 'broken-call-sites', points: 30 }] },
+      fanIn: { count: 3, kind: 'INDIRECT', note: 'supertype dispatch' },
+      callers: [
+        { path: 'A.java', line: 10, side: 'head', inDiff: false },
+        { path: 'B.java', line: 20, side: 'head', inDiff: true },
+      ],
+      testCovered: false,
+      break: { verdicts: { BROKEN: 1, UPDATED: 1, SAFE: 0 }, detail: [], contractChange: ['x → y'] },
+      unknown: null,
+    });
+  }
+  nodes.set('ctx:A.java#Caller.calls', {
+    id: 'ctx:A.java#Caller.calls', fqn: 'Caller.calls()', kind: 'METHOD', path: 'A.java',
+    origin: 'CONTEXT', changeKind: 'UNCHANGED', depth: 1, severity: { total: 0, components: [] },
+    risk: null, fanIn: { count: 1, kind: 'DIRECT', note: null },
+    callers: [{ path: 'C.java', line: 5, side: 'head', inDiff: false }],
+    testCovered: null, break: null, unknown: { reason: 'expansion bound reached' },
+  });
+  const first = [...nodes.values()][0];
+  return {
+    pr: { nwo: 'acme/svc', number: 1, repo: 'svc' },
+    meta: { headRefOid: 'head9', title: 'T', url: 'u' },
+    mergeBase: 'base9', buildRoots: { primary: '.' }, units,
+    graph: {
+      nodes,
+      edges: [
+        { type: 'CALLS', from: 'ctx:A.java#Caller.calls', to: first.id, derivedFrom: 'LSP',
+          verdict: 'BROKEN', depth: 1, evidence: [{ path: 'A.java', line: 10 }] },
+        { type: 'CALLS', from: null, to: first.id, derivedFrom: 'LSP',
+          verdict: 'UPDATED', evidence: [{ path: 'B.java', line: 20 }] },
+        { type: 'TEST_COVERS', from: null, to: first.id, derivedFrom: 'LSP',
+          evidence: [{ path: 'BTest.java', line: 7 }] },
+      ],
+    },
+  };
+};
+
+t('caller lists survive a reload for nodes with no contract change', () => {
+  const db = fresh();
+  const a = richAnalysis();
+  saveAnalysis(db, a);
+  const g = loadGraph(db, PR, 'head9');
+  const ctx = g.nodes.get('ctx:A.java#Caller.calls');
+  assert.ok(ctx, 'context node reloaded');
+  assert.equal(ctx.break, null, 'it never had break analysis');
+  assert.equal(ctx.callers.length, 1, 'its callers are still present');
+  assert.equal(ctx.callers[0].path, 'C.java');
+});
+
+t('edge caller endpoints and verdicts survive a reload', () => {
+  const db = fresh();
+  const a = richAnalysis();
+  saveAnalysis(db, a);
+  const g = loadGraph(db, PR, 'head9');
+  const calls = g.edges.filter((e) => e.type === 'CALLS');
+  assert.equal(calls.length, 2);
+  const drawable = calls.filter((e) => e.from && e.to);
+  assert.equal(drawable.length, 1, 'the endpoint-filled edge is still drawable');
+  assert.equal(drawable[0].verdict, 'BROKEN');
+  assert.equal(drawable[0].depth, 1);
+});
+
+t('the edge index is rebuilt, so a reloaded graph can still take endpoint fills', () => {
+  const db = fresh();
+  saveAnalysis(db, richAnalysis());
+  const g = loadGraph(db, PR, 'head9');
+  assert.ok(g.edgeIndex instanceof Map, 'edgeIndex present');
+  const key = [...g.edgeIndex.keys()].find((k) => k.includes('B.java:20'));
+  assert.ok(key, `no index entry for B.java:20 — keys: ${[...g.edgeIndex.keys()].join(' | ')}`);
+  g.edgeIndex.get(key).from = 'filled-later';
+  assert.equal(g.edges.find((e) => e.evidence[0].path === 'B.java').from, 'filled-later',
+    'the index points at the same object the array holds');
+});
+
+t('a reloaded graph is field-for-field equal to the one that was saved', () => {
+  const db = fresh();
+  const a = richAnalysis();
+  saveAnalysis(db, a);
+  const g = loadGraph(db, PR, 'head9');
+  assert.equal(g.nodes.size, a.graph.nodes.size);
+  for (const [id, orig] of a.graph.nodes) {
+    const back = g.nodes.get(id);
+    assert.ok(back, `node ${id} missing after reload`);
+    for (const k of ['fqn', 'kind', 'path', 'origin', 'changeKind', 'depth', 'testCovered']) {
+      assert.deepEqual(back[k] ?? null, orig[k] ?? null, `${id}.${k}`);
+    }
+    for (const k of ['risk', 'fanIn', 'callers', 'break', 'unknown', 'severity']) {
+      assert.deepEqual(back[k] ?? null, orig[k] ?? null, `${id}.${k}`);
+    }
+  }
+});
+
+t('units reload with the symbol range needed to fetch source', () => {
+  const db = fresh();
+  const a = richAnalysis();
+  saveAnalysis(db, a);
+  const units = loadUnits(db, PR, 'head9');
+  assert.equal(units.length, a.units.length);
+  const withSig = units.find((u) => u.signatureChange);
+  assert.ok(withSig, 'the signature change survived');
+  assert.ok(withSig.symbol?.range, 'symbol range present, so before/after source is locatable');
+  assert.ok(withSig.symbol.selectionRange, 'selection range present, so resolution can re-anchor');
 });
 
 console.log('\nretention — R4 policy');

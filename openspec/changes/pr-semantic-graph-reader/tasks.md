@@ -96,7 +96,8 @@
 - [x] 6b.1 One CALLS edge per (target, call site): break analysis creates it, expansion fills in the caller endpoint. Previously each stage created its own, so 78 of 244 edges were duplicates and 74 had no caller endpoint to draw from
 - [x] 6b.2 Serve symbol source for both images from the bare clone — before/after pairs, with ADDED/REMOVED rendering an explicit absent side and a reason rather than blank text
 - [x] 6b.3 Call-site excerpts from the calling file with the call line marked — the caller is usually not in the PR diff at all
-- [ ] 6b.4 Persist and serve edge caller endpoints through the store so the UI does not have to re-resolve
+- [x] 6b.4 Persist everything a renderer needs — node caller lists, edge endpoints, the parsed symbol range, and the graph's own summary — and assert a reloaded graph is field-for-field equal to the one saved
+- [x] 6b.5 Restore blast-radius bounds, truncations, and resolution health on a cache-served run, so a graph known to be incomplete is never re-presented as complete
 
 ## 7. Local Server API
 

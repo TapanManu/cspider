@@ -10,7 +10,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 
 const MIGRATIONS = [
   // v1
@@ -116,6 +116,28 @@ const MIGRATIONS = [
     last_used_at INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS cache_by_kind ON cache_entries (kind, last_used_at);
+  `,
+  // v2 — persist everything a renderer needs, so a reload does not have to re-resolve.
+  //
+  // v1 lost two things: a node's caller list (only contract-changed nodes kept callers, inside
+  // break_json) and the parsed symbol (so before/after source could not be located). Both are
+  // required by the node-detail view, and re-resolving to recover them costs ~11s/symbol on a
+  // monorepo — the whole reason the cache exists.
+  `
+  ALTER TABLE nodes ADD COLUMN callers TEXT;
+  ALTER TABLE nodes ADD COLUMN test_covered INTEGER;
+  ALTER TABLE nodes ADD COLUMN severity TEXT;
+  ALTER TABLE change_units ADD COLUMN symbol_json TEXT;
+  ALTER TABLE change_units ADD COLUMN signature_change TEXT;
+  `,
+  // v3 — persist the graph's own summary: blast-radius bounds and truncations, resolution health,
+  // changed-line source, processor status.
+  //
+  // Without this, a cache-served run silently omitted its truncation warnings — so a graph that
+  // was known to be incomplete would have been re-presented as complete. That is precisely the
+  // failure the truncation disclosure exists to prevent, reintroduced through the cache.
+  `
+  ALTER TABLE prs ADD COLUMN graph_meta TEXT;
   `,
 ];
 

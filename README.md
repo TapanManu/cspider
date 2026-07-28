@@ -38,6 +38,7 @@ npm run review -- https://github.com/<owner>/<repo>/pull/<n> [more PR urls...]
   --by-severity     order by provisional severity instead of file/containment
   --show-noise      include suppressed low-signal units
   --resolve         resolve callers and run break analysis (starts jdtls)
+  --no-cache        ignore the cached graph for this head SHA and re-resolve
   --max-symbols N   cap symbols resolved per PR (default 40)
   --no-base         skip base-image resolution (removed members stay UNKNOWN)
   --topo            order by callers-before-callees
@@ -52,6 +53,19 @@ npm run review -- https://github.com/<owner>/<repo>/pull/<n> [more PR urls...]
 node src/cli.mjs --prune            # report reclaimable cache
 node src/cli.mjs --prune --yes      # apply it
 ```
+
+### Graph cache
+
+A graph is cached per head SHA, which is content-addressed and therefore safe to reuse:
+
+```
+cold  34s   (jdtls index, base index, resolution, expansion)
+warm   1s   graph from cache (107 nodes, 226 edges)
+```
+
+A cache-served run restores the graph's own summary too — blast-radius bounds, truncations,
+resolution health, processor status — so its disclosures are identical to a fresh run's. `--no-cache`
+forces re-resolution.
 
 ### Review progress
 
@@ -92,7 +106,7 @@ Give it every PR of one logical change and the cross-PR section will link them:
 ## Tests
 
 ```bash
-npm test    # 90 cases across five suites:
+npm test    # 95 cases across five suites:
             #   diff    — parsing, delta types, change kinds, rename/move, noise
             #   compat  — signature compatibility and BROKEN/UPDATED/SAFE verdicts
             #   graph   — break analysis, indirect fan-in, UNKNOWN handling, and
