@@ -610,3 +610,38 @@ Two columns rather than three: modified files on the left; the right column spli
 divider into the impact graph above and the change detail below. The graph gets the full width of
 the right column, which is what makes the lanes legible — the previous middle column was too narrow
 for four lanes at any readable scale.
+
+## Write path (group 9)
+
+Comments are drafted locally and submitted as one review per PR. The whole design rests on a single
+rule from D8: **nothing reaches GitHub without an explicit confirmation of the exact payload.**
+
+Three choices worth recording:
+
+**Anchors resolve at draft time, not submit time.** GitHub can only anchor an inline comment to a
+line that appears in the PR diff. Checking that when the comment is written means an unanchorable
+comment fails immediately; checking it at submit time would mean losing a whole review's work to a
+422. The check runs against `git diff` on both sides — RIGHT needs an added line at head, LEFT a
+deleted line at base.
+
+**A caller outside the diff is the most valuable comment the tool can produce, so it is never
+refused.** Break analysis exists precisely to find call sites the PR did *not* touch — and those are
+by definition outside the diff, which is exactly where GitHub cannot anchor. Such a draft becomes a
+pull-request level comment with its location preserved in the body, and the reviewer is told why.
+Verified on `sedai-simulation-server#244`: a draft on `SessionController.java:241` correctly fell
+back with `line 241 … is not in the diff, so GitHub cannot anchor a comment there`.
+
+Suggestions are the exception — they are refused outside the diff rather than downgraded, because a
+suggestion block only means anything attached to the lines it replaces.
+
+**`confirmed: true` is required, and its absence is a refusal.** Not a warning, not a prompt — the
+submit function returns `{submitted: false}` and issues no HTTP call at all, not even the head check.
+A missing flag therefore cannot post by accident. Live check against the real PR returned
+`409 · not confirmed — nothing was sent`.
+
+23 write tests against a mock that records every call. The assertions that matter:
+- creating, editing, previewing and deleting drafts produce **zero** GitHub calls
+- the previewed payload is `deepEqual` to what submit actually sends
+- a moved head blocks submission and retains the drafts
+- a rejected submit retains every draft, and a second submit posts nothing because nothing is pending
+- replies to existing threads follow the same confirmation discipline

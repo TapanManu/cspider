@@ -49,6 +49,7 @@
         <div class="paneHead">
           <span id="detailTitle">Change</span>
           <div class="spacer"></div>
+          <button id="draftsBtn">drafts <span id="draftCount">0</span></button>
           <button id="markBtn" hidden>mark reviewed</button>
         </div>
         <div id="detail" class="empty">
@@ -59,6 +60,28 @@
       </section>
     </div>
   </main>
+
+  <!-- Review drawer: drafts live here until an explicit, confirmed submit. -->
+  <div id="drawer" hidden>
+    <div class="drawerBox">
+      <div class="drawerHead">
+        <span>Review</span>
+        <div class="spacer"></div>
+        <button id="drawerClose">close</button>
+      </div>
+      <div id="drawerBody"></div>
+      <div class="drawerFoot">
+        <select id="reviewEvent">
+          <option value="COMMENT">Comment</option>
+          <option value="REQUEST_CHANGES">Request changes</option>
+          <option value="APPROVE">Approve</option>
+        </select>
+        <input id="reviewBody" placeholder="overall review comment (optional)">
+        <div class="spacer"></div>
+        <button id="previewBtn">preview payload</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js" type="module"></script>
 </body>

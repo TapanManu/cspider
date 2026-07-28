@@ -112,6 +112,28 @@ Disclosure banners sit above everything: degraded resolution, expansion truncati
 symbols, missing changed-line data, stale review marks. A bounded analysis is never shown as a
 complete one.
 
+### Commenting and submitting a review
+
+Comment on any call site or on the change itself. Drafts are stored locally in SQLite and shown in
+the **drafts** drawer; nothing reaches GitHub until you preview the payload and confirm it.
+
+- **Anchors resolve when you write the comment**, not at submit time. A line GitHub can anchor
+  becomes an inline comment; a line outside the diff becomes a pull-request level comment with its
+  location preserved in the body, and the reason is stated. Discovering an unanchorable comment at
+  submit time would mean losing a review's worth of work.
+- **Suggestions** produce a GitHub ```suggestion``` block. A suggestion outside the diff is refused
+  rather than silently downgraded, because a suggestion only means something anchored to the lines
+  it replaces.
+- **Preview shows the exact payload** — endpoint, `commit_id`, event, body and every comment — and a
+  test asserts what was previewed is byte-for-byte what gets sent.
+- **Submission requires `confirmed: true`.** The default is a refusal, so a missing flag can never
+  post by accident.
+- **A moved head blocks submission** and keeps every draft, because the line numbers in those drafts
+  refer to the old head.
+- **A rejected submit retains every draft**, and already-submitted drafts are never resent.
+
+Events: `COMMENT`, `REQUEST_CHANGES`, `APPROVE`.
+
 ### Graph cache
 
 A graph is cached per head SHA, which is content-addressed and therefore safe to reuse:
@@ -178,6 +200,8 @@ npm test    # 107 cases across six suites:
             #             blocks, and CALLS edge identity, against a real git repo
             #   server  — API contract, including that a bounded or degraded
             #             analysis cannot be served as if it were complete
+            #   write   — drafts, anchoring, suggestions, stale-head blocking, and
+            #             that NOTHING reaches GitHub without explicit confirmation
 ```
 
 A real PR that updated all of its call sites cannot exercise `BROKEN`, so the verdict logic is

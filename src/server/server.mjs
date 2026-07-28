@@ -14,6 +14,8 @@ import { loadGraph, loadGraphMeta, loadUnits, loadReviewed, markReviewed, unmark
 import { beforeAfter, callSiteExcerpt, symbolBlocks } from '../ingest/source.mjs';
 import { orderUnits, bySeverity } from '../review/order.mjs';
 import { topologicalOrder } from '../graph/build.mjs';
+import { createDraft, listDrafts, deleteDraft, updateDraft, previewReview, submitReview,
+  headMoved, fetchThreads, replyToThread, EVENTS } from '../review/drafts.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, 'public');
@@ -47,7 +49,7 @@ const dedupeById = (list) => {
   return [...seen.values()];
 };
 
-export function createApiServer({ cacheDir, dbPath }) {
+export function createApiServer({ cacheDir, dbPath, gh }) {
   const db = openDb(dbPath);
 
   const prRow = (prId) => db.prepare('SELECT * FROM prs WHERE id = ?').get(prId);
@@ -363,6 +365,97 @@ export function createApiServer({ cacheDir, dbPath }) {
           };
         }),
       };
+    },
+
+    // ------------------------------------------------------- review write path (9.x)
+    'GET /api/pr/:prId/drafts': ({ params }) => {
+      const pr = prRow(params.prId);
+      if (!pr) return { __status: 404, error: 'unknown PR' };
+      const drafts = listDrafts(db, params.prId);
+      return {
+        drafts,
+        pending: drafts.filter((d) => !d.submittedAt).length,
+        events: EVENTS,
+      };
+    },
+
+    'POST /api/pr/:prId/drafts': async ({ params, req }) => {
+      const row = prRow(params.prId);
+      if (!row) return { __status: 404, error: 'unknown PR' };
+      const b = await readBody(req);
+      if (!b.path) return { __status: 400, error: 'path required' };
+      const prInfo = {
+        nwo: row.nwo, number: row.number, headSha: row.head_sha, mergeBase: row.merge_base,
+        files: (loadUnits(db, params.prId, row.head_sha) ?? []).map((u) => ({ filename: u.path })),
+      };
+      try {
+        const out = createDraft(db, {
+          prId: params.prId, pr: prInfo, unitId: b.unitId, path: b.path,
+          line: b.line, endLine: b.endLine, side: b.side ?? 'RIGHT',
+          body: b.body, suggestion: b.suggestion,
+        }, { clonePath: clonePathFor(cacheDir, row.nwo) });
+        return { ok: true, ...out, pending: listDrafts(db, params.prId).filter((d) => !d.submittedAt).length };
+      } catch (e) {
+        return { __status: 400, error: e.message };
+      }
+    },
+
+    'POST /api/pr/:prId/drafts/delete': async ({ params, req }) => {
+      const b = await readBody(req);
+      const ok = deleteDraft(db, params.prId, b.draftId);
+      return ok ? { ok: true } : { __status: 404, error: 'no such unsubmitted draft' };
+    },
+
+    'POST /api/pr/:prId/drafts/update': async ({ params, req }) => {
+      const b = await readBody(req);
+      if (!b.body) return { __status: 400, error: 'body required' };
+      const ok = updateDraft(db, params.prId, b.draftId, b.body);
+      return ok ? { ok: true } : { __status: 404, error: 'no such unsubmitted draft' };
+    },
+
+    // The exact payload, for approval. Never a summary of it.
+    'POST /api/pr/:prId/review/preview': async ({ params, req }) => {
+      const row = prRow(params.prId);
+      if (!row) return { __status: 404, error: 'unknown PR' };
+      const b = await readBody(req);
+      const prInfo = { nwo: row.nwo, number: row.number, headSha: row.head_sha };
+      try {
+        return previewReview(db, params.prId, prInfo, b.event ?? 'COMMENT', b.body ?? '');
+      } catch (e) {
+        return { __status: 400, error: e.message };
+      }
+    },
+
+    'POST /api/pr/:prId/review/submit': async ({ params, req }) => {
+      const row = prRow(params.prId);
+      if (!row) return { __status: 404, error: 'unknown PR' };
+      const b = await readBody(req);
+      const prInfo = { nwo: row.nwo, number: row.number, headSha: row.head_sha };
+      const res = submitReview(db, params.prId, prInfo, {
+        event: b.event ?? 'COMMENT', body: b.body ?? '', confirmed: b.confirmed === true,
+      }, gh);
+      return res.submitted ? res : { __status: 409, ...res };
+    },
+
+    'GET /api/pr/:prId/head': ({ params }) => {
+      const row = prRow(params.prId);
+      if (!row) return { __status: 404, error: 'unknown PR' };
+      return headMoved({ nwo: row.nwo, number: row.number, headSha: row.head_sha }, gh);
+    },
+
+    'GET /api/pr/:prId/threads': ({ params }) => {
+      const row = prRow(params.prId);
+      if (!row) return { __status: 404, error: 'unknown PR' };
+      return fetchThreads({ nwo: row.nwo, number: row.number }, gh);
+    },
+
+    'POST /api/pr/:prId/threads/reply': async ({ params, req }) => {
+      const row = prRow(params.prId);
+      if (!row) return { __status: 404, error: 'unknown PR' };
+      const b = await readBody(req);
+      const res = replyToThread({ nwo: row.nwo, number: row.number },
+        { rootId: b.rootId, body: b.body, confirmed: b.confirmed === true }, gh);
+      return res.sent ? res : { __status: 409, ...res };
     },
 
     // ---------------------------------------------------------------- write (7.3)

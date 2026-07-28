@@ -33,7 +33,7 @@ const DELTA_CHIP = {
   MODIFIER: ['', 'modifier'], BODY: ['', 'body'],
 };
 
-const S = { prId: null, pr: null, files: null, selected: null, mode: 'overview' };
+const S = { prId: null, pr: null, files: null, selected: null, mode: 'overview', drafts: [] };
 
 init().catch((e) => { $('#banners').innerHTML = banner('bad', 'Failed to load', esc(e.message)); });
 
@@ -56,6 +56,10 @@ async function init() {
   splitter();
   $('#overviewBtn').onclick = () => { S.selected = null; renderFiles(); overview(); };
   $('#markBtn').onclick = toggleReviewed;
+  $('#draftsBtn').onclick = openDrawer;
+  $('#drawerClose').onclick = () => { $('#drawer').hidden = true; };
+  $('#drawer').onclick = (e) => { if (e.target.id === 'drawer') $('#drawer').hidden = true; };
+  $('#previewBtn').onclick = preview;
 
   const wanted = new URLSearchParams(location.search).get('pr');
   picker.value = prs.some((p) => p.id === wanted) ? wanted : prs[0].id;
@@ -67,6 +71,7 @@ async function selectPr(prId) {
   S.selected = null;
   S.pr = await api(`/api/pr/${encodeURIComponent(prId)}`);
   S.files = await api(`/api/pr/${encodeURIComponent(prId)}/files`);
+  await loadDrafts();
   renderHead();
   renderBanners();
   renderFiles();
@@ -410,25 +415,44 @@ async function renderDetail(id) {
   }
   if (d.callers?.length) {
     const sorted = [...d.callers].sort((a, b) => (b.verdict === 'BROKEN') - (a.verdict === 'BROKEN'));
+    let i = -1;
     for (const c of sorted) {
+      i++;
       const lines = (c.excerpt?.lines ?? []).map((l) =>
         `<div class="${l.isCallSite ? 'del' : 'ctx'}"><span class="ln">${l.line}</span>${esc(l.text)}</div>`).join('');
+      const aid = `s${i}`;
+      const mine = draftsFor(c.path, c.line);
       out.push(`
-        <div class="site ${c.verdict === 'BROKEN' ? 'brokenSite' : ''}">
+        <div class="site ${c.verdict === 'BROKEN' ? 'brokenSite' : ''} ${mine.length ? 'hasDraft' : ''}">
           <div class="hd">
             ${c.verdict ? `<span class="v ${esc(c.verdict)}">${esc(c.verdict)}</span>` : ''}
             <span class="loc">${esc(c.path.split('/').slice(-2).join('/'))}:${c.line}</span>
             ${c.side === 'base' ? '<span class="note">base image</span>' : ''}
+            ${mine.length ? `<span class="draftMark">${mine.length} draft${mine.length === 1 ? '' : 's'}</span>` : ''}
           </div>
           ${c.excerpt?.absent ? '<div class="absent" style="padding:5px 7px">source unavailable at this revision</div>'
             : `<pre class="diff">${lines}</pre>`}
           ${c.reasons?.length ? `<div class="note" style="padding:0 7px 5px">${esc(c.reasons.join('; '))}</div>` : ''}
+          <div class="siteFoot">
+            <button data-comment="${aid}">comment</button>
+            <div class="spacer"></div>
+          </div>
+          ${commentBox(c.path, c.line, aid).replace('<div class="cmtBox"',
+            `<div class="cmtBox" data-path="${esc(c.path)}" data-line="${c.line}" data-side="${esc(c.side ?? 'head')}"`)}
         </div>`);
     }
   }
 
   if (d.source) {
-    out.push('<h4>Diff</h4>');
+    const anchorLine = d.source.after?.startLine ?? u?.symbol?.range?.start?.line + 1;
+    const mine = anchorLine ? draftsFor(n.path, anchorLine) : [];
+    out.push(`<h4>Diff
+      ${anchorLine ? `<span class="n"><button data-comment="chg">comment on this change</button></span>` : ''}
+      ${mine.length ? `<span class="draftMark">${mine.length} draft${mine.length === 1 ? '' : 's'}</span>` : ''}</h4>`);
+    if (anchorLine) {
+      out.push(commentBox(n.path, anchorLine, 'chg').replace('<div class="cmtBox"',
+        `<div class="cmtBox" data-path="${esc(n.path)}" data-line="${anchorLine}" data-side="head"`));
+    }
     out.push(renderDiff(d.source.before, d.source.after));
   }
 
@@ -460,6 +484,7 @@ async function renderDetail(id) {
   }
 
   el.innerHTML = out.join('');
+  wireCommentBoxes(el);
 }
 
 const fmt = (x) => (Array.isArray(x) ? (x.length ? x.join(' ') : '∅') : (x ?? '∅'));
@@ -563,6 +588,175 @@ function lcsDiff(a, b) {
   while (i < n) { out.push({ t: '-', line: a[i], ai: i, bi: j }); i++; }
   while (j < m) { out.push({ t: '+', line: b[j], ai: i, bi: j }); j++; }
   return out;
+}
+
+// ------------------------------------------------------------------ review drafts (9.x)
+//
+// Everything here is local. A draft is stored on this machine and shown in the drawer; nothing
+// reaches GitHub until the payload has been rendered and explicitly confirmed.
+
+async function loadDrafts() {
+  try {
+    const r = await api(`/api/pr/${encodeURIComponent(S.prId)}/drafts`);
+    S.drafts = r.drafts ?? [];
+    $('#draftCount').textContent = String(r.pending ?? 0);
+  } catch { S.drafts = []; }
+}
+
+const draftsFor = (path, line) =>
+  S.drafts.filter((d) => !d.submittedAt && d.path === path && d.line === line);
+
+function commentBox(path, line, anchorId) {
+  return `
+    <div class="cmtBox" id="box-${anchorId}" hidden>
+      <textarea placeholder="comment on ${esc(path.split('/').pop())}:${line}…"></textarea>
+      <textarea class="sugg" placeholder="optional: replacement source, posted as a GitHub suggestion" hidden></textarea>
+      <div class="row">
+        <span class="hintSm">stays local until you submit the review</span>
+        <button data-act="toggleSugg">suggest…</button>
+        <button data-act="save" class="go">save draft</button>
+        <button data-act="cancel">cancel</button>
+      </div>
+    </div>`;
+}
+
+function wireCommentBoxes(scope) {
+  for (const btn of scope.querySelectorAll('[data-comment]')) {
+    btn.onclick = () => {
+      const box = scope.querySelector(`#box-${btn.dataset.comment}`);
+      if (box) box.hidden = !box.hidden;
+      box?.querySelector('textarea')?.focus();
+    };
+  }
+  for (const box of scope.querySelectorAll('.cmtBox')) {
+    const [body, sugg] = box.querySelectorAll('textarea');
+    box.querySelector('[data-act=toggleSugg]').onclick = () => {
+      sugg.hidden = !sugg.hidden;
+      if (!sugg.hidden) sugg.focus();
+    };
+    box.querySelector('[data-act=cancel]').onclick = () => { box.hidden = true; };
+    box.querySelector('[data-act=save]').onclick = async () => {
+      const payload = {
+        unitId: S.selected,
+        path: box.dataset.path,
+        line: Number(box.dataset.line),
+        side: box.dataset.side === 'base' ? 'LEFT' : 'RIGHT',
+        body: body.value.trim(),
+        suggestion: sugg.hidden ? undefined : sugg.value.trim() || undefined,
+      };
+      if (!payload.body && !payload.suggestion) { body.focus(); return; }
+      const r = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/drafts`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).then((x) => x.json());
+      if (r.error) { alert(r.error); return; }
+      await loadDrafts();
+      // A pr-level fallback is worth stating: the reviewer should know GitHub cannot anchor it.
+      if (r.scope === 'pr') {
+        alert(`Saved as a pull-request level comment.\n\n${r.reason}\n\nIt will appear in the review body with its location.`);
+      }
+      renderDetail(S.selected);
+    };
+  }
+}
+
+function openDrawer() {
+  $('#drawer').hidden = false;
+  renderDrawer();
+}
+
+function renderDrawer(extra = '') {
+  const pending = S.drafts.filter((d) => !d.submittedAt);
+  const sent = S.drafts.filter((d) => d.submittedAt);
+  const rows = [];
+
+  if (!pending.length) rows.push('<div class="absent">No drafts yet. Comment on a call site or on the change itself.</div>');
+  for (const d of pending) {
+    rows.push(`
+      <div class="draftRow ${d.scope === 'pr' ? 'prLevel' : ''}">
+        <div class="loc">
+          <span class="scopeTag ${d.scope}">${d.scope === 'pr' ? 'PR-LEVEL' : 'INLINE'}</span>
+          ${esc(d.path)}${d.line ? `:${d.line}` : ''}${d.side === 'LEFT' ? ' (base side)' : ''}
+        </div>
+        <div class="bd">${esc(d.body)}</div>
+        <div class="acts">
+          <button data-del="${esc(d.draftId)}">delete</button>
+        </div>
+      </div>`);
+  }
+  if (sent.length) {
+    rows.push(`<h4>Submitted <span class="n">${sent.length}</span></h4>`);
+    for (const d of sent) {
+      rows.push(`<div class="draftRow sent"><div class="loc">${esc(d.path)}${d.line ? `:${d.line}` : ''} · review ${esc(d.reviewId ?? '')}</div>
+        <div class="bd">${esc(d.body)}</div></div>`);
+    }
+  }
+
+  $('#drawerBody').innerHTML = rows.join('') + extra;
+  for (const b of $('#drawerBody').querySelectorAll('[data-del]')) {
+    b.onclick = async () => {
+      await fetch(`/api/pr/${encodeURIComponent(S.prId)}/drafts/delete`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ draftId: b.dataset.del }),
+      });
+      await loadDrafts();
+      renderDrawer();
+      if (S.selected) renderDetail(S.selected);
+    };
+  }
+}
+
+/**
+ * Task 9.8 — show the exact payload, then require an explicit confirmation. The reviewer approves
+ * what will be sent, not a description of it.
+ */
+async function preview() {
+  const event = $('#reviewEvent').value;
+  const body = $('#reviewBody').value;
+  const p = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/review/preview`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ event, body }),
+  }).then((x) => x.json());
+  if (p.error) { renderDrawer(`<div class="confirmBar"><b>${esc(p.error)}</b></div>`); return; }
+
+  const head = await api(`/api/pr/${encodeURIComponent(S.prId)}/head`).catch(() => null);
+  const stale = head?.moved
+    ? `<div class="confirmBar"><b>Head moved</b><span>The pull request is now at
+        ${esc((head.current ?? '').slice(0, 12))}, analysed at ${esc((head.was ?? '').slice(0, 12))}.
+        Submitting is blocked — re-analyse first, because these line numbers refer to the old head.</span></div>`
+    : '';
+
+  const extra = `
+    <h4>Exactly this will be sent <span class="n">${esc(p.endpoint)}</span></h4>
+    <div class="payload">${esc(JSON.stringify(p.payload, null, 2))}</div>
+    ${stale}
+    ${stale ? '' : `<div class="confirmBar">
+      <b>${esc(event.replace('_', ' '))}</b>
+      <span>${p.counts.inline} inline · ${p.counts.prLevel} in the review body</span>
+      <div class="spacer"></div>
+      <button id="confirmBtn" class="${event === 'REQUEST_CHANGES' ? 'danger' : 'go'}">confirm and post to GitHub</button>
+    </div>`}`;
+
+  renderDrawer(extra);
+  const btn = $('#confirmBtn');
+  if (btn) {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = 'posting…';
+      const res = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/review/submit`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ event, body, confirmed: true }),
+      }).then((x) => x.json());
+      await loadDrafts();
+      renderDrawer(res.submitted
+        ? `<div class="confirmBar" style="border-color:var(--added);background:rgba(70,201,122,.1)">
+             <b style="color:var(--added)">Posted</b>
+             <span>review ${esc(String(res.reviewId))} · ${esc(res.event)}
+             ${res.url ? `· <a href="${esc(res.url)}" target="_blank" style="color:var(--accent)">open on GitHub</a>` : ''}</span></div>`
+        : `<div class="confirmBar"><b>Not submitted</b><span>${esc(res.reason ?? 'unknown error')}
+             ${res.retainedDrafts ? `· ${res.retainedDrafts} draft(s) kept` : ''}</span></div>`);
+    };
+  }
 }
 
 // ------------------------------------------------------------------ reviewed
