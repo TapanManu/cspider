@@ -252,27 +252,47 @@ async function focus(id) {
     `${c.orphanSites ? ` · ${c.orphanSites} site(s) outside any member` : ''}` +
     `${c.fanInKind === 'INDIRECT' ? ' · fan-in is indirect' : ''}`;
 
-  // Fixed lanes. Nothing is simulated, so labels never overlap and the picture is stable
-  // between selections — you can compare two symbols without re-reading the layout.
-  const LANE = { test: -740, caller: -380, centre: 0, callee: 380 };
-  const GAP = 66;
+  // Fixed lanes, sized to the viewport. Nothing is simulated, so labels never overlap and the
+  // picture is stable between selections — two symbols stay comparable.
+  const box = $('#cy').getBoundingClientRect();
+  const usableH = Math.max(320, box.height - 90);
+  const laneCount = 2 + (ego.callees.length ? 1 : 0) + (tests.length ? 1 : 0);
+  const laneW = Math.max(220, Math.min(360, (box.width - 120) / laneCount));
+
   const els = [];
+  const laneX = {};
+  // A lane taller than the viewport wraps into sub-columns rather than running off-screen.
   const lane = (list, x, role) => {
-    const y0 = -((list.length - 1) * GAP) / 2;
-    list.forEach((n, i) => els.push({
-      data: {
-        id: n.id, label: `${n.owner ?? ''}\n${bare(n.name)}`, role,
-        kind: n.origin === 'CONTEXT' ? 'UNCHANGED' : n.changeKind,
-        origin: n.origin, broken: n.broken, unknown: !!n.unknown, reviewed: n.reviewed,
-        size: role === 'centre' ? 54 : Math.max(26, Math.min(48, 26 + (n.risk ?? 0) * 0.4)),
-      },
-      position: { x, y: y0 + i * GAP },
-    }));
+    laneX[role] = x;
+    if (!list.length) return { height: 0, cols: 0 };
+    const perCol = Math.max(1, Math.floor(usableH / 58));
+    const cols = Math.ceil(list.length / perCol);
+    const rows = Math.ceil(list.length / cols);
+    const gap = rows > 1 ? Math.min(64, usableH / rows) : 64;
+    const colGap = 150;
+    list.forEach((n, i) => {
+      const col = Math.floor(i / rows);
+      const row = i % rows;
+      const inCol = Math.min(rows, list.length - col * rows);
+      const y0 = -((inCol - 1) * gap) / 2;
+      els.push({
+        data: {
+          id: n.id, label: `${n.owner ?? ''}\n${bare(n.name)}`, role,
+          kind: n.origin === 'CONTEXT' ? 'UNCHANGED' : n.changeKind,
+          origin: n.origin, broken: n.broken, unknown: !!n.unknown, reviewed: n.reviewed,
+          size: role === 'centre' ? 58 : Math.max(24, Math.min(44, 24 + (n.risk ?? 0) * 0.35)),
+        },
+        position: { x: x + (col - (cols - 1) / 2) * colGap, y: y0 + row * gap },
+      });
+    });
+    return { height: rows * gap, cols };
   };
-  lane(ego.callers, LANE.caller, 'caller');
-  lane([ego.centre], LANE.centre, 'centre');
-  lane(ego.callees, LANE.callee, 'callee');
-  lane(tests, LANE.test, 'test');
+
+  const xTests = tests.length ? -laneW * (ego.callees.length ? 2 : 2) : null;
+  lane(tests, xTests ?? -laneW * 2, 'test');
+  lane(ego.callers, -laneW, 'caller');
+  lane([ego.centre], 0, 'centre');
+  lane(ego.callees, laneW, 'callee');
 
   const present = new Set(els.map((e) => e.data.id));
   for (const n of ego.callers) if (present.has(n.id)) {
@@ -285,16 +305,20 @@ async function focus(id) {
     els.push({ data: { id: `t-${n.id}`, source: n.id, target: ego.centre.id, type: 'TEST_COVERS' } });
   }
 
-  // Lane captions as unclickable label nodes, so the picture explains itself.
-  const top = -(Math.max(ego.callers.length, ego.callees.length, tests.length, 1) * GAP) / 2 - 60;
-  const caption = (x, text, n) => els.push({
-    data: { id: `lbl:${text}`, label: n === null ? text : `${text} (${n})`, isLabel: true },
-    position: { x, y: top }, selectable: false, grabbable: false,
-  });
-  if (tests.length) caption(LANE.test, 'TESTS', tests.length);
-  caption(LANE.caller, 'CALLED BY', ego.callers.length);
-  caption(LANE.centre, 'THIS CHANGE', null);
-  caption(LANE.callee, 'CALLS', ego.callees.length);
+  // Lane captions as unclickable label nodes, placed just above the tallest lane.
+  const ys = els.filter((e) => e.position).map((e) => e.position.y);
+  const top = Math.min(...ys, 0) - 46;
+  const caption = (x, text, n) => {
+    if (x === undefined) return;
+    els.push({
+      data: { id: `lbl:${text}`, label: n === null ? text : `${text} · ${n}`, isLabel: true },
+      position: { x, y: top }, selectable: false, grabbable: false,
+    });
+  };
+  if (tests.length) caption(laneX.test, 'TESTS', tests.length);
+  caption(laneX.caller, 'CALLED BY', ego.callers.length);
+  caption(laneX.centre, 'THIS CHANGE', null);
+  if (ego.callees.length) caption(laneX.callee, 'CALLS', ego.callees.length);
 
   render(els, 'preset');
   S.cy.getElementById(ego.centre.id).addClass('centre');
@@ -317,13 +341,15 @@ async function focus(id) {
 }
 
 function render(elements, layoutName) {
-  $('#cy').innerHTML = '';
+  const host = $('#cy');
+  host.innerHTML = '';
   S.cy = cytoscape({
-    container: $('#cy'),
+    container: host,
     elements,
-    layout: { name: layoutName, fit: true, padding: 45 },
-    minZoom: 0.25,
+    layout: { name: layoutName, fit: false },
+    minZoom: 0.18,
     maxZoom: 2.5,
+    wheelSensitivity: 0.25,
     style: [
       { selector: 'node', style: {
         'background-color': (n) => COLOR[n.data('kind')] ?? '#4a5260',
@@ -346,7 +372,11 @@ function render(elements, layoutName) {
         shape: 'round-rectangle',
       } },
       { selector: 'node.centre', style: {
-        'border-width': 4, 'border-color': '#7aa2f7', 'font-size': 12, 'font-weight': 'bold',
+        'border-width': 6, 'border-color': '#7aa2f7', 'border-opacity': 1,
+        'font-size': 13, 'font-weight': 'bold', color: '#eaf0ff',
+        'overlay-color': '#7aa2f7', 'overlay-opacity': 0.18, 'overlay-padding': 14,
+        'text-background-color': '#1a2540', 'text-background-opacity': 0.95,
+        'z-index': 100,
       } },
       { selector: 'node[?broken]', style: { 'border-color': '#ff4d5a', 'border-width': 3 } },
       { selector: 'node[?unknown]', style: { 'border-style': 'dotted', 'border-color': '#e0a02b', 'border-width': 3 } },
@@ -361,6 +391,32 @@ function render(elements, layoutName) {
       { selector: 'edge[type = "TEST_COVERS"]', style: { 'line-style': 'dashed', 'line-color': '#4aa8e0', 'target-arrow-color': '#4aa8e0' } },
     ],
   });
+
+  // A flex/grid child has no measured size at construction time, so fitting here silently used a
+  // 0×0 viewport — which is why the graph appeared tiny in a corner. Fit after layout, and again
+  // whenever the pane is actually resized.
+  const settle = () => {
+    if (!S.cy || S.cy.destroyed()) return;
+    S.cy.resize();
+    S.cy.fit(S.cy.elements(':visible'), 55);
+    // Keep the focused symbol in the middle of the pane, and never zoom in so far that the
+    // surrounding lanes fall outside the viewport.
+    const c = S.cy.$('.centre');
+    if (c.nonempty()) {
+      if (S.cy.zoom() > 1.15) S.cy.zoom(1.15);
+      S.cy.center(c);
+    } else if (S.cy.zoom() > 1.3) {
+      S.cy.zoom(1.3);
+      S.cy.center();
+    }
+  };
+  S.cy.ready(() => requestAnimationFrame(settle));
+  requestAnimationFrame(settle);
+  setTimeout(settle, 120);
+
+  S.ro?.disconnect();
+  S.ro = new ResizeObserver(() => settle());
+  S.ro.observe(host);
 }
 
 // ------------------------------------------------------------------ detail (right)
