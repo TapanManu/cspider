@@ -19,46 +19,47 @@
   <div id="banners"></div>
 
   <main>
-    <!-- 1. Files, because that is where a review starts -->
-    <section id="filesPane">
+    <!-- Left: modified files -->
+    <nav id="filesPane">
       <div class="paneHead">
         <span id="filesTitle">Files</span>
         <div class="spacer"></div>
         <input id="filter" type="search" placeholder="filter…" aria-label="filter">
       </div>
       <div id="fileList"></div>
-    </section>
+    </nav>
 
-    <!-- 2. Impact: an ego view of the selected symbol, not a whole-PR hairball -->
-    <section id="impactPane">
-      <div class="paneHead">
-        <span id="impactTitle">Impact</span>
-        <span id="impactSub" class="sub2"></span>
-        <div class="spacer"></div>
-        <label><input type="checkbox" id="showTests" checked> tests</label>
-        <button id="overviewBtn" title="file-level overview">overview</button>
-        <button id="fit">fit</button>
-      </div>
-      <div id="cy"></div>
-      <div id="legend"></div>
-    </section>
+    <div id="rightCol">
+      <!-- Top right: impact graph. SVG with a viewBox, so it always fits its pane exactly. -->
+      <section id="graphPane">
+        <div class="paneHead">
+          <span id="impactTitle">Impact</span>
+          <span id="impactSub" class="sub2"></span>
+          <div class="spacer"></div>
+          <label><input type="checkbox" id="showTests" checked> tests</label>
+          <button id="overviewBtn">overview</button>
+        </div>
+        <div id="graph"></div>
+      </section>
 
-    <!-- 3. What actually changed, and who it breaks -->
-    <aside id="detailPane">
-      <div class="paneHead">
-        <span>Change</span>
-        <div class="spacer"></div>
-        <button id="markBtn" hidden>mark reviewed</button>
-      </div>
-      <div id="detail" class="empty">
-        <p>Pick a change on the left.</p>
-        <p class="hint">Selecting one shows its callers and callees as lanes in the middle, and the
-        before/after plus every call site here.</p>
-      </div>
-    </aside>
+      <div id="splitter" title="drag to resize"></div>
+
+      <!-- Bottom right: what actually changed, and who it breaks -->
+      <section id="detailPane">
+        <div class="paneHead">
+          <span id="detailTitle">Change</span>
+          <div class="spacer"></div>
+          <button id="markBtn" hidden>mark reviewed</button>
+        </div>
+        <div id="detail" class="empty">
+          <p>Pick a file on the left, then a change inside it.</p>
+          <p class="hint">The graph above shows what calls it and what it reaches. The diff and every
+          call site appear here.</p>
+        </div>
+      </section>
+    </div>
   </main>
 
-  <script src="/vendor/cytoscape.min.js"></script>
   <script src="/app.js" type="module"></script>
 </body>
 </html>

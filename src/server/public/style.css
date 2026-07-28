@@ -67,9 +67,21 @@ button.on { background: var(--accent); color: #0b1020; border-color: var(--accen
 .banner b { flex: none; }
 
 /* ------------------------------------------------------------------ layout */
-main { flex: 1; min-height: 0; overflow: hidden; display: grid; grid-template-columns: 370px 1fr 460px; }
-section, aside { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--line); }
-aside { border-right: none; }
+/* Two columns: files, then a right column split into graph over detail. */
+main { flex: 1; min-height: 0; overflow: hidden; display: grid; grid-template-columns: 330px 1fr; }
+nav, section { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#filesPane { border-right: 1px solid var(--line); }
+#rightCol {
+  display: grid; grid-template-rows: var(--graphH, 46%) 6px 1fr;
+  min-height: 0; min-width: 0; overflow: hidden;
+}
+#splitter {
+  background: var(--line); cursor: row-resize; position: relative;
+}
+#splitter::after {
+  content: ''; position: absolute; inset: -3px 0; }
+#splitter:hover { background: var(--accent); }
+#graphPane, #detailPane { min-height: 0; overflow: hidden; }
 .paneHead {
   display: flex; align-items: center; gap: 8px; padding: 6px 10px; flex: none;
   border-bottom: 1px solid var(--line); background: var(--panel); font-size: 12px; color: var(--dim);
@@ -133,15 +145,32 @@ aside { border-right: none; }
 .riskbar.hi i { background: var(--broken); }
 
 /* ------------------------------------------------------------------ impact */
-#impactPane { background: var(--bg); overflow: hidden; }
-#cy { flex: 1; min-height: 0; min-width: 0; }
-#legend {
-  flex: none; border-top: 1px solid var(--line); padding: 5px 10px;
-  font-size: 10.5px; color: var(--dim); display: flex; gap: 12px; flex-wrap: wrap;
-}
-#legend i { font-style: normal; }
-.sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
-.emptyImpact { padding: 24px; color: var(--faint); font-size: 12.5px; max-width: 420px; line-height: 1.7; }
+/* The graph is an SVG with a viewBox and preserveAspectRatio, so it is always fully visible and
+   centred in whatever space the pane has. No zoom, pan, fit or resize handling exists — the class
+   of bug that produced a tiny graph stuck at the bottom of the pane is gone by construction. */
+#graph { flex: 1; min-height: 0; min-width: 0; position: relative; }
+#graph svg { display: block; width: 100%; height: 100%; }
+.emptyImpact { padding: 20px; color: var(--faint); font-size: 12.5px; max-width: 460px; line-height: 1.7; }
+
+.gLane { fill: var(--lane); }
+.gLaneLabel { fill: #7f8a9b; font: 700 9px ui-monospace, monospace; letter-spacing: 1.3px; }
+.gEdge { fill: none; stroke: #4a5464; stroke-width: 1.4; }
+.gEdge.broken { stroke: var(--broken); stroke-width: 2.4; }
+.gEdge.updated { stroke: var(--added); }
+.gEdge.test { stroke: var(--moved); stroke-dasharray: 4 3; }
+.gNode { cursor: pointer; }
+.gNode rect { stroke-width: 1.5; stroke: rgba(0,0,0,.4); rx: 5; }
+.gNode:hover rect { stroke: var(--accent); stroke-width: 2; }
+.gNode .owner { fill: #9aa4b4; font: 8.5px ui-monospace, monospace; }
+.gNode .name { fill: #edf1f7; font: 600 10.5px ui-monospace, monospace; }
+.gNode.ctx rect { fill: #333b47; stroke-dasharray: 3 2; stroke: #4d5666; }
+.gNode.ctx .name { fill: #b6bfcc; font-weight: 400; }
+.gNode.centre rect { stroke: var(--accent); stroke-width: 3; }
+.gNode.centre .name { fill: #fff; font-weight: 700; }
+.gNode.broken rect { stroke: var(--broken); stroke-width: 2.5; }
+.gNode.reviewed { opacity: .5; }
+.gBadge { font: 700 8px ui-monospace, monospace; }
+.gHalo { fill: none; stroke: var(--accent); stroke-opacity: .35; stroke-width: 2; }
 
 /* ------------------------------------------------------------------ detail */
 #detail { overflow: auto; flex: 1; padding: 0 12px 12px; }

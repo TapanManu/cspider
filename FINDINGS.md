@@ -571,3 +571,42 @@ Also fixed: context node FQNs were built as `name + LSP detail`, producing
 `createSession(CreateSessionRequest) : ResponseEntity<…>.SessionController.createSession` once
 parsed. They now use the same `Owner#name(params)` shape as change units, so every consumer parses
 them uniformly.
+
+## Finding F17 — the graph was rebuilt three times before admitting the wrong tool
+
+The impact graph rendered tiny and stranded at the bottom of its pane. Three fixes were attempted
+against the canvas library: fitting after `ready`, adding a `ResizeObserver`, then replacing
+`fit()/zoom()/center()` with explicit viewport maths. Each looked correct and each failed the same
+way in the browser.
+
+Two real causes, found only from a screenshot of the settled state:
+
+1. **The document was scrolling.** `body` was `100vh` but `main` and the panes did not contain
+   overflow, so the graph container grew far taller than the window. The graph *was* centred — in a
+   canvas whose middle sat below the fold.
+2. **Chained viewport calls fight each other.** `fit()` frames the whole extent (a wide ego view
+   shrinks to a dot), `zoom(level)` preserves pan and can push content off-screen, and `center()`
+   then races the resize observer.
+
+The third attempt fixed both and still did not behave. At that point the honest conclusion was that
+an imperative viewport is the wrong instrument for this view. The lane layout has fixed positions
+and a handful of nodes — it needs no zoom, pan, or fit at all.
+
+**Replaced with hand-rolled SVG using `viewBox` + `preserveAspectRatio="xMidYMid meet"`.** The
+content is always fully visible and centred in whatever space the pane has, by construction. Zoom,
+pan, fit, resize handling and the observer are all deleted — roughly 60 lines of framing logic
+removed, along with a 435KB dependency from the page.
+
+Measured content for the worst case on `sedai-simulation-server#244` (10 tests, 12 callers, 2
+callees): 1052×600, aspect 1.75, which scales to a legible ~0.8 in a wide top pane.
+
+The lesson is about tool choice, not about the bug: three rounds of patching a general-purpose graph
+engine cost more than writing the 80 lines of SVG the actual layout needed. A fixed-position layout
+does not want a viewport.
+
+## Layout, as requested
+
+Two columns rather than three: modified files on the left; the right column split by a draggable
+divider into the impact graph above and the change detail below. The graph gets the full width of
+the right column, which is what makes the lanes legible — the previous middle column was too narrow
+for four lanes at any readable scale.
