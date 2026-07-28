@@ -143,7 +143,17 @@ aside { border-right: none; }
 .emptyImpact { padding: 24px; color: var(--faint); font-size: 12.5px; max-width: 420px; line-height: 1.7; }
 
 /* ------------------------------------------------------------------ detail */
-#detail { overflow: auto; flex: 1; padding: 12px; }
+#detail { overflow: auto; flex: 1; padding: 0 12px 12px; }
+
+/* What changed stays on screen while the call sites scroll past it. */
+.stick {
+  position: sticky; top: 0; z-index: 5; background: var(--panel);
+  padding: 10px 0 8px; margin: 0 -12px; padding-left: 12px; padding-right: 12px;
+  border-bottom: 1px solid var(--line);
+  box-shadow: 0 6px 12px -8px rgba(0,0,0,.55);
+}
+.stick .dTitle { display: flex; align-items: baseline; gap: 6px; }
+.deltaRow { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 #detail.empty { color: var(--faint); }
 #detail .hint { font-size: 11.5px; line-height: 1.6; }
 .dTitle { font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; word-break: break-all; }

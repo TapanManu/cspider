@@ -255,9 +255,11 @@ async function focus(id) {
   // Fixed lanes, sized to the viewport. Nothing is simulated, so labels never overlap and the
   // picture is stable between selections — two symbols stay comparable.
   const box = $('#cy').getBoundingClientRect();
-  const usableH = Math.max(320, box.height - 90);
+  const usableH = Math.max(300, box.height - 96);
   const laneCount = 2 + (ego.callees.length ? 1 : 0) + (tests.length ? 1 : 0);
-  const laneW = Math.max(220, Math.min(360, (box.width - 120) / laneCount));
+  // Lanes are sized so the whole picture fits at a LEGIBLE zoom. Fitting a wide spread into the
+  // pane is what made the graph shrink to a dot — better to keep it tight and readable.
+  const laneW = Math.max(170, Math.min(250, (box.width - 90) / laneCount));
 
   const els = [];
   const laneX = {};
@@ -265,11 +267,11 @@ async function focus(id) {
   const lane = (list, x, role) => {
     laneX[role] = x;
     if (!list.length) return { height: 0, cols: 0 };
-    const perCol = Math.max(1, Math.floor(usableH / 58));
+    const perCol = Math.max(1, Math.floor(usableH / 48));
     const cols = Math.ceil(list.length / perCol);
     const rows = Math.ceil(list.length / cols);
-    const gap = rows > 1 ? Math.min(64, usableH / rows) : 64;
-    const colGap = 150;
+    const gap = rows > 1 ? Math.min(52, usableH / rows) : 52;
+    const colGap = 120;
     list.forEach((n, i) => {
       const col = Math.floor(i / rows);
       const row = i % rows;
@@ -280,7 +282,9 @@ async function focus(id) {
           id: n.id, label: `${n.owner ?? ''}\n${bare(n.name)}`, role,
           kind: n.origin === 'CONTEXT' ? 'UNCHANGED' : n.changeKind,
           origin: n.origin, broken: n.broken, unknown: !!n.unknown, reviewed: n.reviewed,
-          size: role === 'centre' ? 58 : Math.max(24, Math.min(44, 24 + (n.risk ?? 0) * 0.35)),
+          size: role === 'centre' ? 46 : Math.max(18, Math.min(32, 18 + (n.risk ?? 0) * 0.25)),
+          changed: n.origin !== 'CONTEXT',
+          mark: n.origin === 'CONTEXT' ? '' : (n.changeKind?.[0] ?? ''),
         },
         position: { x: x + (col - (cols - 1) / 2) * colGap, y: y0 + row * gap },
       });
@@ -367,9 +371,15 @@ function render(elements, layoutName) {
         color: '#7f8a9b', 'text-valign': 'center', 'letter-spacing': 1.5,
         'text-background-opacity': 0, events: 'no',
       } },
+      // Unchanged context is deliberately quiet; a changed symbol must read as changed at a glance.
       { selector: 'node[origin = "CONTEXT"]', style: {
-        'background-opacity': 0.4, 'border-style': 'dashed', 'border-color': '#5d6674',
-        shape: 'round-rectangle',
+        'background-color': '#39414f', 'background-opacity': 0.85,
+        'border-style': 'dashed', 'border-color': '#4d5666', 'border-width': 1,
+        shape: 'round-rectangle', color: '#8d97a8', 'font-size': 9,
+      } },
+      { selector: 'node[?changed]', style: {
+        'border-width': 3, 'border-color': '#0e1014',
+        color: '#e8edf6', 'font-size': 10, 'font-weight': 'bold',
       } },
       { selector: 'node.centre', style: {
         'border-width': 6, 'border-color': '#7aa2f7', 'border-opacity': 1,
@@ -395,20 +405,20 @@ function render(elements, layoutName) {
   // A flex/grid child has no measured size at construction time, so fitting here silently used a
   // 0×0 viewport — which is why the graph appeared tiny in a corner. Fit after layout, and again
   // whenever the pane is actually resized.
+  // Fitting to the full extent is what shrank the graph to a dot. Legibility comes first: clamp
+  // the zoom into a readable band and centre on the focus. If the content is wider than that
+  // allows, the reviewer pans — which is far better than reading 6px labels.
+  const MIN_Z = 0.7;
+  const MAX_Z = 1.25;
   const settle = () => {
     if (!S.cy || S.cy.destroyed()) return;
     S.cy.resize();
-    S.cy.fit(S.cy.elements(':visible'), 55);
-    // Keep the focused symbol in the middle of the pane, and never zoom in so far that the
-    // surrounding lanes fall outside the viewport.
+    S.cy.fit(S.cy.elements(':visible'), 40);
+    const z = S.cy.zoom();
+    if (z < MIN_Z) S.cy.zoom(MIN_Z);
+    else if (z > MAX_Z) S.cy.zoom(MAX_Z);
     const c = S.cy.$('.centre');
-    if (c.nonempty()) {
-      if (S.cy.zoom() > 1.15) S.cy.zoom(1.15);
-      S.cy.center(c);
-    } else if (S.cy.zoom() > 1.3) {
-      S.cy.zoom(1.3);
-      S.cy.center();
-    }
+    S.cy.center(c.nonempty() ? c : S.cy.elements(':visible'));
   };
   S.cy.ready(() => requestAnimationFrame(settle));
   requestAnimationFrame(settle);
@@ -439,16 +449,25 @@ async function renderDetail(id) {
   const out = [];
   const name = (n.fqn.split('#').pop() || n.fqn);
   const owner = (n.fqn.split('#')[0] || '').split('.').pop();
-  out.push(`<div class="dTitle">${esc(owner)}<span style="color:var(--faint)">#</span>${esc(name)}</div>`);
-  out.push(`<div class="dPath">${esc(n.path ?? '')}${u ? ` · ${esc(u.changeKind)}` : ''}</div>`);
+  out.push('<div class="stick">');
+  out.push(`<div class="dTitle">
+      ${u ? `<span class="ck ${esc(u.changeKind)}">${esc(u.changeKind[0])}</span>` : ''}
+      ${esc(owner)}<span style="color:var(--faint)">#</span>${esc(bare(name))}<span style="color:var(--faint)">(${esc(params(name))})</span>
+    </div>`);
+  out.push(`<div class="dPath">${esc(n.path ?? '')}</div>`);
+  if (u?.signatureChange) out.push(sigChangeHtml(u.signatureChange));
+  else if (u?.deltas?.length) {
+    out.push(`<div class="deltaRow">${u.deltas.map((d) => {
+      const [cls, label] = DELTA_CHIP[d.type] ?? ['', d.type.toLowerCase()];
+      return `<span class="chip ${cls}">${esc(label)}</span>`;
+    }).join('')}</div>`);
+  }
+  out.push('</div>');
 
   if (n.unknown) {
     out.push(`<div class="unknownBox"><b>UNKNOWN</b> — ${esc(n.unknown.reason ?? n.unknown)}
       <span class="sm">Not analysed. That is not the same as “no impact”.</span></div>`);
   }
-
-  // The single most useful fact, when present, goes first.
-  if (u?.signatureChange) out.push(sigChangeHtml(u.signatureChange));
 
   const v = d.callerSummary;
   if (v && (v.BROKEN || v.UPDATED || v.SAFE)) {
