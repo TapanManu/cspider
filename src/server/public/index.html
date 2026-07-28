@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>cspider</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header id="top">
+    <div class="brand">cspider</div>
+    <select id="prPicker" aria-label="pull request"></select>
+    <div id="counts" class="counts"></div>
+    <div class="spacer"></div>
+    <div id="progress" class="progress"></div>
+  </header>
+
+  <!-- Disclosures live above everything: a bounded or degraded analysis must never be
+       presented as if it were complete. -->
+  <div id="banners"></div>
+
+  <main>
+    <section id="listPane">
+      <div class="paneHead">
+        <span>Change units</span>
+        <select id="orderMode" aria-label="order">
+          <option value="file">file &amp; containment</option>
+          <option value="severity">severity</option>
+          <option value="topo">callers first (topological)</option>
+        </select>
+      </div>
+      <ol id="unitList"></ol>
+    </section>
+
+    <section id="graphPane">
+      <div class="paneHead">
+        <span>Blast radius</span>
+        <label><input type="checkbox" id="edgeCalls" checked> calls</label>
+        <label><input type="checkbox" id="edgeTests" checked> test-covers</label>
+        <label><input type="checkbox" id="showContext" checked> context nodes</label>
+        <button id="fit" title="fit to view">fit</button>
+      </div>
+      <div id="cy"></div>
+      <div id="legend"></div>
+    </section>
+
+    <aside id="detailPane">
+      <div class="paneHead"><span>Node</span><button id="markBtn" hidden>mark reviewed</button></div>
+      <div id="detail" class="empty">Select a node in the list or the graph.</div>
+    </aside>
+  </main>
+
+  <script src="/vendor/cytoscape.min.js"></script>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

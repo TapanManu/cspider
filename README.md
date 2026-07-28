@@ -54,6 +54,27 @@ node src/cli.mjs --prune            # report reclaimable cache
 node src/cli.mjs --prune --yes      # apply it
 ```
 
+### UI
+
+```bash
+npm run serve            # http://127.0.0.1:4173
+```
+
+Three synchronised panes over the persisted analyses — the server never starts a language server,
+so it is instant:
+
+- **change units** — ordered by file, severity, or callers-first (topological), with broken and
+  unknown badges and a reviewed toggle
+- **blast radius** — a canvas where colour is change kind, size is risk, dashed outlines are
+  unchanged context nodes, red edges are broken calls and dashed blue are test-covers; filter by
+  edge type, hide context nodes
+- **node facts** — signature, visibility, annotations, deltas, risk components, before/after source,
+  and **call-site excerpts pulled from the calling file** with UPDATED/BROKEN/SAFE verdicts
+
+Selecting in either the list or the graph selects in both. Disclosure banners sit above everything:
+degraded resolution, expansion truncation, unresolved symbols, missing changed-line data, stale
+review marks. A bounded analysis is never shown as a complete one.
+
 ### Graph cache
 
 A graph is cached per head SHA, which is content-addressed and therefore safe to reuse:
@@ -106,7 +127,7 @@ Give it every PR of one logical change and the cross-PR section will link them:
 ## Tests
 
 ```bash
-npm test    # 95 cases across five suites:
+npm test    # 107 cases across six suites:
             #   diff    — parsing, delta types, change kinds, rename/move, noise
             #   compat  — signature compatibility and BROKEN/UPDATED/SAFE verdicts
             #   graph   — break analysis, indirect fan-in, UNKNOWN handling, and
@@ -115,6 +136,8 @@ npm test    # 95 cases across five suites:
             #             per-artifact-class cache eviction policy
             #   source  — before/after retrieval, call-site excerpts, symbol
             #             blocks, and CALLS edge identity, against a real git repo
+            #   server  — API contract, including that a bounded or degraded
+            #             analysis cannot be served as if it were complete
 ```
 
 A real PR that updated all of its call sites cannot exercise `BROKEN`, so the verdict logic is
@@ -129,6 +152,7 @@ proven against a stub resolver rather than only against live repositories.
 | `src/review/` | provisional severity, ordering, cross-repo correlation |
 | `src/graph/` | nodes and edges, break analysis, indirect fan-in, risk, blast radius |
 | `src/store/` | SQLite schema, analysis persistence, reviewed state, cache retention |
+| `src/server/` | local HTTP API and the UI it serves (`public/`) |
 | `src/cli.mjs` | the review command |
 | `src/lsp.mjs` | JDT LS client + launcher, with annotation-processor agent attachment |
 | `probe/` | the feasibility walking skeleton — answered Q1–Q3, kept for reference |

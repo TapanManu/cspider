@@ -239,7 +239,7 @@ t('the edge index is rebuilt, so a reloaded graph can still take endpoint fills'
   saveAnalysis(db, richAnalysis());
   const g = loadGraph(db, PR, 'head9');
   assert.ok(g.edgeIndex instanceof Map, 'edgeIndex present');
-  const key = [...g.edgeIndex.keys()].find((k) => k.includes('B.java:20'));
+  const key = [...g.edgeIndex.keys()].find((k) => k.startsWith('CALLS|') && k.includes('B.java:20'));
   assert.ok(key, `no index entry for B.java:20 — keys: ${[...g.edgeIndex.keys()].join(' | ')}`);
   g.edgeIndex.get(key).from = 'filled-later';
   assert.equal(g.edges.find((e) => e.evidence[0].path === 'B.java').from, 'filled-later',

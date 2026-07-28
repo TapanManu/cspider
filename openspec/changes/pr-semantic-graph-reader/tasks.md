@@ -102,8 +102,8 @@
 ## 7. Local Server API
 
 - [ ] 7.1 Implement the analysis pipeline orchestrator with resumable, content-addressed stages
-- [ ] 7.2 Expose read endpoints for graph, node detail, symbol source blocks, call-site excerpts, resolution health, and analysis status
-- [ ] 7.3 Expose expansion, filtering, ordering, and reviewed-state endpoints
+- [x] 7.2 Expose read endpoints for graph, node detail, symbol source blocks, call-site excerpts, resolution health, and analysis status
+- [x] 7.3 Expose expansion, filtering, ordering, and reviewed-state endpoints
 - [ ] 7.4 Expose draft CRUD and submission endpoints
 - [ ] 7.5 Implement progress streaming so the UI can start on resolved nodes while indexing continues
 
@@ -113,15 +113,15 @@
 - [ ] 8.2 Implement the node detail before/after view with Monaco per block, split and unified toggle, and intra-line highlighting
 - [ ] 8.3 Implement ADDED and REMOVED node rendering with the correct empty-side treatment
 - [ ] 8.4 Implement collapsed expandable context stubs above and below the selected symbol, plus a full-file view with a return path
-- [ ] 8.5 Implement inline call-site excerpts with UPDATED/BROKEN/SAFE tags and navigation to the calling node with back-navigation
+- [x] 8.5 Implement inline call-site excerpts with UPDATED/BROKEN/SAFE tags and navigation to the calling node with back-navigation
 - [ ] 8.6 Implement the callee delta list with expansion into callee nodes
-- [ ] 8.7 Implement the facts panel: deltas, test coverage, risk components, PR ids, and unresolved references
-- [ ] 8.8 Implement the graph view with visual encoding of change kind, origin, risk, reviewed state, PR color, and truncation counts
-- [ ] 8.9 Implement the ordered-list view with reviewed marking and progress count
+- [x] 8.7 Implement the facts panel: deltas, test coverage, risk components, PR ids, and unresolved references
+- [x] 8.8 Implement the graph view with visual encoding of change kind, origin, risk, reviewed state, PR color, and truncation counts
+- [x] 8.9 Implement the ordered-list view with reviewed marking and progress count
 - [ ] 8.10 Implement the file-tree view with per-file blocks
-- [ ] 8.11 Implement shared selection state and synchronization across all three views
-- [ ] 8.12 Implement edge-type filtering with visual distinction for CO_CHANGED and other non-resolved edges
-- [ ] 8.13 Implement the resolution-health indicator, the degraded-graph banner, the unavailable-edge-type notice, and the cross-PR overlap banner
+- [x] 8.11 Implement shared selection state and synchronization across all three views
+- [x] 8.12 Implement edge-type filtering with visual distinction for CO_CHANGED and other non-resolved edges
+- [x] 8.13 Implement the resolution-health indicator, the degraded-graph banner, the unavailable-edge-type notice, and the cross-PR overlap banner
 
 ## 9. Review Write Path
 

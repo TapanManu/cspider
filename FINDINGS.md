@@ -473,3 +473,35 @@ Cache payoff, same PR: **34s cold → 1s warm**, 107 nodes and 226 edges restore
 Five new store tests, including a field-for-field equality assertion between a saved graph and its
 reload. A caching layer that silently drops fields is worse than no cache, because the UI would
 render a different graph than the CLI reported and nothing would flag the difference.
+
+## Server and canvas (7.2, 7.3, 8.5, 8.7–8.13)
+
+`npm run serve` reads only from SQLite, so it never starts a language server — the expensive work
+happened in the CLI run and a graph keyed by head SHA is safe to reuse. Three synchronised panes:
+ordered units, the blast-radius canvas, and a node facts panel with inline call-site excerpts.
+
+The design rule carried into the UI: **anything the analysis did not establish must look
+unestablished.** UNKNOWN renders as a labelled box with its reason, not as an empty section. An
+absent side of a diff states why ("did not exist at the merge base") rather than showing blank. The
+banner strip above everything reports degraded resolution, expansion truncation, unresolved symbols,
+missing changed-line data, and stale review marks, and the server sends those disclosures inside the
+same payload as the graph so a client cannot render one without the other.
+
+### Finding F14 — TEST_COVERS edges were never drawable
+
+Building the canvas revealed that all 54 `TEST_COVERS` edges had no caller endpoint. Only `CALLS`
+edges were registered in the edge index, so only they got `from` filled in during expansion. The
+edge-type filter for test coverage would have existed in the UI and done **nothing**, while the
+legend implied it worked.
+
+Fixed by keying the index on `(type, target, site)` and filling every edge kind for a resolved call
+site. Undrawable edges on `sedai-simulation-server#244` fell from **62 to 8**, and the remaining 8
+are call sites outside any member — reported in the legend rather than hidden.
+
+The pattern is now familiar enough to name: three of the last four findings (F12, F13, F14) were
+cases where a feature appeared to work while producing nothing or producing something wrong. Each
+was caught only by checking a count against what it should have been, never by the code failing.
+
+Server tests assert the contract that matters most: a truncated or degraded analysis is reported as
+such, an unresolved PR returns `resolved: false` rather than an empty graph, and only edges with both
+endpoints are served while the rest are counted.

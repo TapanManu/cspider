@@ -35,22 +35,23 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
   // enclosing caller; expansion resolves that and fills `from` in on the SAME edge. Without this
   // index the two stages each created their own edge — 78 of 244 were duplicates.
   const edgeIndex = new Map();
-  const edgeKey = (to, path, line) => `${to}|${path}:${line}`;
-  const addCallEdge = (to, site, extra = {}) => {
-    const k = edgeKey(to, site.path, site.line);
+  const edgeKey = (type, to, path, line) => `${type}|${to}|${path}:${line}`;
+  const addEdge = (type, to, site, extra = {}) => {
+    const k = edgeKey(type, to, site.path, site.line);
     const existing = edgeIndex.get(k);
     if (existing) {
-      Object.assign(existing, { ...extra, ...(extra.from ? { from: extra.from } : {}) });
+      Object.assign(existing, extra);
       return existing;
     }
     const e = {
-      type: 'CALLS', from: null, to, derivedFrom: 'LSP',
+      type, from: null, to, derivedFrom: 'LSP',
       evidence: [{ path: site.path, line: site.line }], ...extra,
     };
     edgeIndex.set(k, e);
     edges.push(e);
     return e;
   };
+  const addCallEdge = (to, site, extra = {}) => addEdge('CALLS', to, site, extra);
 
   const strip = (p) => (buildRootPrefix && p.startsWith(`${buildRootPrefix}/`)
     ? p.slice(buildRootPrefix.length + 1) : p);
@@ -143,10 +144,9 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
 
     for (const c of callers) {
       addCallEdge(u.id, c);
-      if (isTestSource(c.path)) {
-        edges.push({ type: 'TEST_COVERS', from: null, to: u.id, derivedFrom: 'LSP',
-          evidence: [{ path: c.path, line: c.line }] });
-      }
+      // A test's coverage edge needs a caller endpoint too, or it can never be drawn and the
+      // "test-covers" filter would silently do nothing.
+      if (isTestSource(c.path)) addEdge('TEST_COVERS', u.id, c);
     }
 
     const contractChanged = removed || u.deltas.some((d) =>
@@ -422,13 +422,19 @@ export async function expandBlastRadius(graph, resolver, opts = {}) {
           added++;
         }
 
-        // Fill `from` in on the edge break analysis already created for this call site.
-        const key = `${node.id}|${site.path}:${site.line}`;
-        const existing = graph.edgeIndex?.get(key);
-        if (existing) {
+        // Fill `from` in on every edge break analysis already created for this call site —
+        // CALLS and, when the caller is a test, TEST_COVERS.
+        let filled = 0;
+        for (const type of ['CALLS', 'TEST_COVERS']) {
+          const key = `${type}|${node.id}|${site.path}:${site.line}`;
+          const existing = graph.edgeIndex?.get(key);
+          if (!existing) continue;
           existing.from = fromId;
           existing.depth = d;
-        } else {
+          filled++;
+        }
+        if (filled === 0) {
+          const key = `CALLS|${node.id}|${site.path}:${site.line}`;
           const e = { type: 'CALLS', from: fromId, to: node.id, derivedFrom: 'LSP', depth: d,
             evidence: [{ path: site.path, line: site.line }] };
           graph.edgeIndex?.set(key, e);
@@ -458,7 +464,7 @@ export async function expandBlastRadius(graph, resolver, opts = {}) {
       }
       ctx.callers = refs.map((r) => ({ path: unstrip(r.path), line: r.line, side: 'head', inDiff: false }));
       for (const c of ctx.callers) {
-        const k = `${ctx.id}|${c.path}:${c.line}`;
+        const k = `CALLS|${ctx.id}|${c.path}:${c.line}`;
         if (graph.edgeIndex?.has(k)) continue;
         const e = { type: 'CALLS', from: null, to: ctx.id, derivedFrom: 'LSP', depth: d + 1,
           evidence: [{ path: c.path, line: c.line }] };
