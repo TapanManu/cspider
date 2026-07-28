@@ -152,7 +152,7 @@ nav, section { display: flex; flex-direction: column; min-width: 0; min-height: 
 #graph svg { display: block; width: 100%; height: 100%; }
 .emptyImpact { padding: 20px; color: var(--faint); font-size: 12.5px; max-width: 460px; line-height: 1.7; }
 
-.gLane { fill: var(--lane); }
+.gLane { fill: var(--lane); fill-opacity: .55; stroke: var(--line); stroke-width: 1; }
 .gLaneLabel { fill: #7f8a9b; font: 700 9px ui-monospace, monospace; letter-spacing: 1.3px; }
 .gEdge { fill: none; stroke: #4a5464; stroke-width: 1.4; }
 .gEdge.broken { stroke: var(--broken); stroke-width: 2.4; }
@@ -161,13 +161,15 @@ nav, section { display: flex; flex-direction: column; min-width: 0; min-height: 
 .gNode { cursor: pointer; }
 .gNode rect { stroke-width: 1.5; stroke: rgba(0,0,0,.4); rx: 5; }
 .gNode:hover rect { stroke: var(--accent); stroke-width: 2; }
-.gNode .owner { fill: #9aa4b4; font: 8.5px ui-monospace, monospace; }
-.gNode .name { fill: #edf1f7; font: 600 10.5px ui-monospace, monospace; }
-.gNode.ctx rect { fill: #333b47; stroke-dasharray: 3 2; stroke: #4d5666; }
-.gNode.ctx .name { fill: #b6bfcc; font-weight: 400; }
-.gNode.centre rect { stroke: var(--accent); stroke-width: 3; }
+.gNode .owner { font: 8.5px ui-monospace, monospace; opacity: .95; }
+.gNode .name { fill: #edf1f7; font: 600 11px ui-monospace, monospace; }
+.gNode:hover rect { fill-opacity: .22 !important; }
+.gNode.ctx rect { stroke-dasharray: 4 3; }
+.gNode.ctx .name { fill: #c2cad6; font-weight: 400; }
+.gNode.centre rect { stroke: var(--accent) !important; stroke-width: 2.5; fill-opacity: .2 !important; }
 .gNode.centre .name { fill: #fff; font-weight: 700; }
-.gNode.broken rect { stroke: var(--broken); stroke-width: 2.5; }
+.gNode.centre .owner { fill: var(--accent) !important; }
+.gNode.broken rect { stroke: var(--broken) !important; stroke-width: 2.5; }
 .gNode.reviewed { opacity: .5; }
 .gBadge { font: 700 8px ui-monospace, monospace; }
 .gHalo { fill: none; stroke: var(--accent); stroke-opacity: .35; stroke-width: 2; }
@@ -182,12 +184,23 @@ nav, section { display: flex; flex-direction: column; min-width: 0; min-height: 
   border-bottom: 1px solid var(--line);
   box-shadow: 0 6px 12px -8px rgba(0,0,0,.55);
 }
-.stick .dTitle { display: flex; align-items: baseline; gap: 6px; }
+.stick .dTitle { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* flex children must not shrink below their content, or long identifiers wrap character by
+   character — which is what turned the header into a vertical stack of fragments. */
+.stick .dTitle .ck { flex: none; }
+.stick .dTitle .sym {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stick .dTitle .hash { color: var(--faint); }
+.stick .dTitle .prm { flex: none; color: var(--faint); font-weight: 400; font-size: 12px; }
 .deltaRow { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 #detail.empty { color: var(--faint); }
 #detail .hint { font-size: 11.5px; line-height: 1.6; }
-.dTitle { font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; word-break: break-all; }
-.dPath { color: var(--faint); font-size: 11px; word-break: break-all; margin: 2px 0 10px; }
+.dTitle { font-family: ui-monospace, monospace; font-size: 14px; font-weight: 600; }
+.dPath {
+  color: var(--faint); font-size: 11px; margin: 3px 0 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+}
 h4 {
   margin: 16px 0 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .7px;
   color: var(--dim); border-bottom: 1px solid var(--line); padding-bottom: 4px;

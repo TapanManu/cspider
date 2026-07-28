@@ -205,16 +205,18 @@ const clip = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n - 1
 function svgNode(n, x, y, cls) {
   const classes = ['gNode', cls, n.origin === 'CONTEXT' ? 'ctx' : '', n.broken ? 'broken' : '',
     n.reviewed ? 'reviewed' : ''].filter(Boolean).join(' ');
-  const fill = n.origin === 'CONTEXT' ? '' : ` fill="${COLOR[n.changeKind] ?? '#4a5260'}"`;
+  // Transparent fill with a coloured border: a solid block made the owner line unreadable, and an
+  // outline reads as a state (added / modified / removed) rather than as decoration.
+  const col = n.origin === 'CONTEXT' ? '#5d6674' : (COLOR[n.changeKind] ?? '#5d6674');
   const halo = cls === 'centre'
-    ? `<rect class="gHalo" x="${x - 5}" y="${y - 5}" width="${NW + 10}" height="${NH + 10}" rx="8"/>` : '';
+    ? `<rect class="gHalo" x="${x - 5}" y="${y - 5}" width="${NW + 10}" height="${NH + 10}" rx="9"/>` : '';
   const badge = n.origin === 'CONTEXT' ? '' :
-    `<text class="gBadge" x="${x + NW - 8}" y="${y + 12}" text-anchor="end" fill="rgba(0,0,0,.6)">${svgEsc(n.changeKind[0])}</text>`;
+    `<text class="gBadge" x="${x + NW - 9}" y="${y + 14}" text-anchor="end" fill="${col}">${svgEsc(n.changeKind[0])}</text>`;
   return `<g class="${classes}" data-id="${svgEsc(n.id)}" tabindex="0">
     ${halo}
-    <rect x="${x}" y="${y}" width="${NW}" height="${NH}"${fill}/>
-    <text class="owner" x="${x + 8}" y="${y + 13}">${svgEsc(clip(n.owner || '—', 26))}</text>
-    <text class="name" x="${x + 8}" y="${y + 26}">${svgEsc(clip(bare(n.name), 24))}</text>
+    <rect x="${x}" y="${y}" width="${NW}" height="${NH}" fill="${col}" fill-opacity="0.12" stroke="${col}"/>
+    <text class="owner" x="${x + 9}" y="${y + 13}" fill="${col}">${svgEsc(clip(n.owner || '—', 24))}</text>
+    <text class="name" x="${x + 9}" y="${y + 27}">${svgEsc(clip(bare(n.name), 23))}</text>
     ${badge}
     <title>${svgEsc(n.fqn)}${n.unknown ? `\nUNKNOWN: ${svgEsc(n.unknown)}` : ''}</title>
   </g>`;
@@ -263,10 +265,11 @@ function overview() {
     const y = Math.floor(i / cols) * CH;
     const kind = f.broken ? 'REMOVED' : f.added > f.removed ? 'ADDED' : 'MODIFIED';
     const name = f.path.split('/').pop();
+    const col = COLOR[kind];
     inner += `<g class="gNode" data-file="${svgEsc(f.path)}" tabindex="0">
-      <rect x="${x}" y="${y}" width="${NW}" height="${NH}" fill="${COLOR[kind]}"/>
-      <text class="owner" x="${x + 8}" y="${y + 13}">+${f.added} −${f.removed} ~${f.modified}${f.broken ? ` · ${f.broken}✗` : ''}</text>
-      <text class="name" x="${x + 8}" y="${y + 26}">${svgEsc(clip(name.replace(/\.java$/, ''), 22))}</text>
+      <rect x="${x}" y="${y}" width="${NW}" height="${NH}" fill="${col}" fill-opacity="0.12" stroke="${col}"/>
+      <text class="owner" x="${x + 9}" y="${y + 13}" fill="${col}">+${f.added} −${f.removed} ~${f.modified}${f.broken ? ` · ${f.broken}✗` : ''}</text>
+      <text class="name" x="${x + 9}" y="${y + 27}">${svgEsc(clip(name.replace(/\.java$/, ''), 21))}</text>
       <title>${svgEsc(f.path)}</title>
     </g>`;
   });
@@ -378,9 +381,11 @@ async function renderDetail(id) {
   const name = (n.fqn.split('#').pop() || n.fqn);
   const owner = (n.fqn.split('#')[0] || '').split('.').pop();
   out.push('<div class="stick">');
-  out.push(`<div class="dTitle">
+  const ps = params(name);
+  out.push(`<div class="dTitle" title="${esc(n.fqn)}">
       ${u ? `<span class="ck ${esc(u.changeKind)}">${esc(u.changeKind[0])}</span>` : ''}
-      ${esc(owner)}<span style="color:var(--faint)">#</span>${esc(bare(name))}<span style="color:var(--faint)">(${esc(params(name))})</span>
+      <span class="sym">${esc(owner)}<span class="hash">#</span>${esc(bare(name))}</span>
+      ${ps ? `<span class="prm">(${esc(ps.length > 48 ? `${ps.split(',').length} params` : ps)})</span>` : '<span class="prm">()</span>'}
     </div>`);
   out.push(`<div class="dPath">${esc(n.path ?? '')}</div>`);
   if (u?.signatureChange) out.push(sigChangeHtml(u.signatureChange));
