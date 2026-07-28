@@ -54,7 +54,7 @@ async function init() {
   $('#filter').oninput = renderFiles;
   $('#showTests').onchange = () => (S.selected ? focus(S.selected) : null);
   $('#overviewBtn').onclick = () => { S.selected = null; renderFiles(); overview(); };
-  $('#fit').onclick = () => S.cy?.fit(undefined, 40);
+  $('#fit').onclick = () => S.frame?.();
   $('#markBtn').onclick = toggleReviewed;
 
   const wanted = new URLSearchParams(location.search).get('pr');
@@ -405,28 +405,58 @@ function render(elements, layoutName) {
   // A flex/grid child has no measured size at construction time, so fitting here silently used a
   // 0×0 viewport — which is why the graph appeared tiny in a corner. Fit after layout, and again
   // whenever the pane is actually resized.
-  // Fitting to the full extent is what shrank the graph to a dot. Legibility comes first: clamp
-  // the zoom into a readable band and centre on the focus. If the content is wider than that
-  // allows, the reviewer pans — which is far better than reading 6px labels.
-  const MIN_Z = 0.7;
-  const MAX_Z = 1.25;
-  const settle = () => {
+  // Framing is done with explicit viewport maths rather than fit()/zoom()/center().
+  //
+  // Chaining those three was unreliable: fit() frames the whole extent (shrinking a wide ego view
+  // to a dot), zoom(level) preserves pan so it can push content off-screen, and center() then
+  // fights whatever the ResizeObserver did next. The result settled with the graph tiny and stuck
+  // at the bottom of the pane. Computing zoom and pan in one shot is deterministic.
+  const MIN_Z = 0.62;
+  const MAX_Z = 1.2;
+  const PAD = 34;
+
+  const frame = () => {
     if (!S.cy || S.cy.destroyed()) return;
     S.cy.resize();
-    S.cy.fit(S.cy.elements(':visible'), 40);
-    const z = S.cy.zoom();
-    if (z < MIN_Z) S.cy.zoom(MIN_Z);
-    else if (z > MAX_Z) S.cy.zoom(MAX_Z);
-    const c = S.cy.$('.centre');
-    S.cy.center(c.nonempty() ? c : S.cy.elements(':visible'));
-  };
-  S.cy.ready(() => requestAnimationFrame(settle));
-  requestAnimationFrame(settle);
-  setTimeout(settle, 120);
+    const w = host.clientWidth;
+    const h = host.clientHeight;
+    if (w < 40 || h < 40) return;                       // pane not laid out yet
 
+    const els = S.cy.elements().filter((e) => e.isNode() && e.style('display') !== 'none');
+    if (!els.length) return;
+    const bb = els.boundingBox();
+    if (!bb.w || !bb.h) return;
+
+    const zoom = Math.max(MIN_Z, Math.min(MAX_Z, Math.min((w - PAD * 2) / bb.w, (h - PAD * 2) / bb.h)));
+
+    // Anchor on the focused node when there is one, so re-centring is predictable between
+    // selections; otherwise on the centre of everything visible.
+    const c = S.cy.$('.centre');
+    const anchor = c.nonempty()
+      ? c.position()
+      : { x: bb.x1 + bb.w / 2, y: bb.y1 + bb.h / 2 };
+
+    S.cy.viewport({
+      zoom,
+      pan: { x: w / 2 - anchor.x * zoom, y: h / 2 - anchor.y * zoom },
+    });
+  };
+
+  S.cy.ready(() => requestAnimationFrame(frame));
+  requestAnimationFrame(frame);
+  setTimeout(frame, 60);
+  setTimeout(frame, 250);
+
+  // Guard the observer against its own resize() call, which would otherwise re-fire it forever.
   S.ro?.disconnect();
-  S.ro = new ResizeObserver(() => settle());
+  let pending = false;
+  S.ro = new ResizeObserver(() => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; frame(); });
+  });
   S.ro.observe(host);
+  S.frame = frame;
 }
 
 // ------------------------------------------------------------------ detail (right)
