@@ -402,3 +402,43 @@ and how much it would reclaim before deleting anything.
 18 store tests, including: a mark survives line movement, a mark goes stale on a visibility change
 alone, TTL expiry evicts the index but never the clone, the size cap spares clones, and reviewer
 state survives an eviction that clears every evictable artefact.
+
+## Rendering prerequisites — two data gaps found while scoping the UI
+
+### Gap 2 (correctness) — CALLS edges were duplicated and half-anchored
+
+Break analysis created a CALLS edge per call site, and blast-radius expansion later created its own
+edge for the same site. On `sedai-simulation-server#244` that produced **244 edges of which only 166
+were distinct — 78 duplicates** — and 74 carried no caller endpoint at all, because break analysis
+knows the call *site* but not the enclosing caller.
+
+An edge with one endpoint cannot be drawn, and duplicates would have double-weighted every
+fan-in-derived visual. Fixed by giving edges an identity — `(target, path, line)` — so break
+analysis creates the edge and expansion fills `from` in on the *same* edge. After the fix:
+
+```
+CALLS edges: 172   distinct: 172   duplicated: 0
+with caller endpoint: 164 / 172     drawable: 164
+```
+
+The remaining 8 are call sites outside any member (field initialisers, static blocks). They keep
+their site evidence and are deliberately not given a synthetic enclosing node.
+
+This was worth fixing before writing any renderer. A UI built on the old edge set would have looked
+correct while over-counting relationships.
+
+### Gap 1 (missing capability) — no source text was served
+
+The graph stored `path` and `range` but no source, so nothing could render a before/after.
+`src/ingest/source.mjs` now reads both images straight out of the bare clone — no worktree needed:
+
+- `beforeAfter` — the pair for a change unit. ADDED and REMOVED return an **explicitly absent** side
+  with a reason, so "did not exist" is never rendered as "was blank".
+- `callSiteExcerpt` — lines around a call site in the *calling* file, with the call line marked.
+  This is the thing GitHub structurally cannot show, since the caller is usually not in the diff.
+- `symbolBlocks` (task 8.1) — a file decomposed into ordered, non-overlapping member blocks plus
+  synthetic blocks for the regions between them. A test asserts every non-blank line of the file is
+  accounted for by some block, so no part of a file can go silently unrendered.
+
+11 new tests, run against a real two-commit git repo rather than a stub, so retrieval is exercised
+the way it runs in production.

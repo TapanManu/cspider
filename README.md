@@ -92,13 +92,15 @@ Give it every PR of one logical change and the cross-PR section will link them:
 ## Tests
 
 ```bash
-npm test    # 79 cases across four suites:
+npm test    # 90 cases across five suites:
             #   diff    — parsing, delta types, change kinds, rename/move, noise
             #   compat  — signature compatibility and BROKEN/UPDATED/SAFE verdicts
             #   graph   — break analysis, indirect fan-in, UNKNOWN handling, and
             #             blast-radius bounds, all against a stub resolver
             #   store   — reviewed-state retention across head advances, and the
             #             per-artifact-class cache eviction policy
+            #   source  — before/after retrieval, call-site excerpts, symbol
+            #             blocks, and CALLS edge identity, against a real git repo
 ```
 
 A real PR that updated all of its call sites cannot exercise `BROKEN`, so the verdict logic is
@@ -108,7 +110,7 @@ proven against a stub resolver rather than only against live repositories.
 
 | Path | Purpose |
 |---|---|
-| `src/ingest/` | GitHub via `gh`, clone/worktree, payload cache, build-root detection |
+| `src/ingest/` | GitHub via `gh`, clone/worktree, payload cache, build-root detection, changed lines, source retrieval |
 | `src/java/` | tree-sitter symbol extraction and the change-unit differ |
 | `src/review/` | provisional severity, ordering, cross-repo correlation |
 | `src/graph/` | nodes and edges, break analysis, indirect fan-in, risk, blast radius |

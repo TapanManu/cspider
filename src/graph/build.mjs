@@ -31,6 +31,27 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
   const truncations = [];
   let budget = queryBudget;
 
+  // One CALLS edge per (target, call site). Break analysis knows the site but not yet the
+  // enclosing caller; expansion resolves that and fills `from` in on the SAME edge. Without this
+  // index the two stages each created their own edge — 78 of 244 were duplicates.
+  const edgeIndex = new Map();
+  const edgeKey = (to, path, line) => `${to}|${path}:${line}`;
+  const addCallEdge = (to, site, extra = {}) => {
+    const k = edgeKey(to, site.path, site.line);
+    const existing = edgeIndex.get(k);
+    if (existing) {
+      Object.assign(existing, { ...extra, ...(extra.from ? { from: extra.from } : {}) });
+      return existing;
+    }
+    const e = {
+      type: 'CALLS', from: null, to, derivedFrom: 'LSP',
+      evidence: [{ path: site.path, line: site.line }], ...extra,
+    };
+    edgeIndex.set(k, e);
+    edges.push(e);
+    return e;
+  };
+
   const strip = (p) => (buildRootPrefix && p.startsWith(`${buildRootPrefix}/`)
     ? p.slice(buildRootPrefix.length + 1) : p);
   const unstrip = (p) => (buildRootPrefix ? `${buildRootPrefix}/${p}` : p);
@@ -121,8 +142,7 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
     node.testCovered = callers.some((c) => isTestSource(c.path));
 
     for (const c of callers) {
-      edges.push({ type: 'CALLS', from: null, to: u.id, derivedFrom: 'LSP',
-        evidence: [{ path: c.path, line: c.line }] });
+      addCallEdge(u.id, c);
       if (isTestSource(c.path)) {
         edges.push({ type: 'TEST_COVERS', from: null, to: u.id, derivedFrom: 'LSP',
           evidence: [{ path: c.path, line: c.line }] });
@@ -132,7 +152,7 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
     const contractChanged = removed || u.deltas.some((d) =>
       ['SIGNATURE', 'VISIBILITY', 'THROWS', 'ANNOTATION'].includes(d.type));
     if (!contractChanged) {
-      for (const e of edges) if (e.to === u.id && e.type === 'CALLS' && !e.verdict) e.verdict = 'SAFE';
+      for (const c of callers) addCallEdge(u.id, c, { verdict: 'SAFE' });
       continue;
     }
 
@@ -163,11 +183,7 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
       const r = signatureCompatibility(before, removed ? null : u.symbol, { inDiff: c.inDiff });
       verdicts[r.verdict]++;
       detail.push({ ...c, verdict: r.verdict, reasons: r.reasons });
-      for (const e of edges) {
-        if (e.to === u.id && e.type === 'CALLS' && e.evidence[0].line === c.line && !e.verdict) {
-          e.verdict = r.verdict;
-        }
-      }
+      addCallEdge(u.id, c, { verdict: r.verdict });
     }
     node.break = { verdicts, detail, contractChange: describeContract(u, removed) };
   }
@@ -181,7 +197,7 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
   }
 
   return {
-    nodes, edges, unresolved, truncations, resolved: true,
+    nodes, edges, edgeIndex, unresolved, truncations, resolved: true,
     queries: (head?.queries ?? 0) + (base?.queries ?? 0),
     budgetLeft: budget,
     touchedSource,
@@ -406,10 +422,18 @@ export async function expandBlastRadius(graph, resolver, opts = {}) {
           added++;
         }
 
-        graph.edges.push({
-          type: 'CALLS', from: fromId, to: node.id, derivedFrom: 'LSP', depth: d,
-          evidence: [{ path: site.path, line: site.line }],
-        });
+        // Fill `from` in on the edge break analysis already created for this call site.
+        const key = `${node.id}|${site.path}:${site.line}`;
+        const existing = graph.edgeIndex?.get(key);
+        if (existing) {
+          existing.from = fromId;
+          existing.depth = d;
+        } else {
+          const e = { type: 'CALLS', from: fromId, to: node.id, derivedFrom: 'LSP', depth: d,
+            evidence: [{ path: site.path, line: site.line }] };
+          graph.edgeIndex?.set(key, e);
+          graph.edges.push(e);
+        }
 
         if (d < depth && !existingChanged) next.push(graph.nodes.get(id));
       }
@@ -433,6 +457,14 @@ export async function expandBlastRadius(graph, resolver, opts = {}) {
         continue;
       }
       ctx.callers = refs.map((r) => ({ path: unstrip(r.path), line: r.line, side: 'head', inDiff: false }));
+      for (const c of ctx.callers) {
+        const k = `${ctx.id}|${c.path}:${c.line}`;
+        if (graph.edgeIndex?.has(k)) continue;
+        const e = { type: 'CALLS', from: null, to: ctx.id, derivedFrom: 'LSP', depth: d + 1,
+          evidence: [{ path: c.path, line: c.line }] };
+        graph.edgeIndex?.set(k, e);
+        graph.edges.push(e);
+      }
       ctx.fanIn = { count: ctx.callers.length, kind: 'DIRECT', note: null };
       frontier.push(ctx);
     }

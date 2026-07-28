@@ -91,6 +91,13 @@
 - [x] 6.13 Implement per-PR graph scoping with unconditional overlap disclosure on every affected PR, plus the opt-in merged view with cross-PR node merging and single-PR filtering
 - [x] 6.14 Write graph tests covering bounds, truncation disclosure, break classification, and ordering determinism
 
+## 6b. Rendering prerequisites (found while scoping the UI)
+
+- [x] 6b.1 One CALLS edge per (target, call site): break analysis creates it, expansion fills in the caller endpoint. Previously each stage created its own, so 78 of 244 edges were duplicates and 74 had no caller endpoint to draw from
+- [x] 6b.2 Serve symbol source for both images from the bare clone — before/after pairs, with ADDED/REMOVED rendering an explicit absent side and a reason rather than blank text
+- [x] 6b.3 Call-site excerpts from the calling file with the call line marked — the caller is usually not in the PR diff at all
+- [ ] 6b.4 Persist and serve edge caller endpoints through the store so the UI does not have to re-resolve
+
 ## 7. Local Server API
 
 - [ ] 7.1 Implement the analysis pipeline orchestrator with resumable, content-addressed stages
@@ -101,7 +108,7 @@
 
 ## 8. Code View UI
 
-- [ ] 8.1 Implement symbol-block decomposition of changed files from document-symbol ranges, including synthetic blocks for non-symbol hunks
+- [x] 8.1 Implement symbol-block decomposition of changed files from document-symbol ranges, including synthetic blocks for non-symbol hunks
 - [ ] 8.2 Implement the node detail before/after view with Monaco per block, split and unified toggle, and intra-line highlighting
 - [ ] 8.3 Implement ADDED and REMOVED node rendering with the correct empty-side treatment
 - [ ] 8.4 Implement collapsed expandable context stubs above and below the selected symbol, plus a full-file view with a return path
