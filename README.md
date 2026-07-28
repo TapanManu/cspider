@@ -21,6 +21,28 @@ history correlation, `TEST_COVERS`, and topological review ordering.
 **Not built yet:** the plugin contract extraction (Phase B), persistence, the local server API,
 the UI, and comment posting.
 
+## Quick start
+
+```bash
+npm install
+npm run jdtls                                       # one-off: fetch Eclipse JDT LS
+npm start -- https://github.com/OWNER/REPO/pull/123 # analyse, serve, open the browser
+```
+
+That single command analyses the PR, starts the local server, and opens the graph in your browser
+deep-linked to that PR. Second run on the same PR is served from cache (~1s instead of ~35s).
+
+Give it every PR of one logical change and they all load, with the cross-PR producer/consumer links:
+
+```bash
+npm start -- \
+  https://github.com/SedaiEngineering/sedai-simulation-server/pull/244 \
+  https://github.com/SedaiEngineering/sedai-models/pull/4897
+```
+
+Options: `--depth N`, `--max-symbols N`, `--no-base`, `--no-cache`, `--no-open`, `--port N`,
+`--skip-analysis` (serve what is already stored).
+
 ## Setup
 
 Node 20+, a JDK 21+, and an authenticated `gh` CLI. No token handling — it shells out to `gh`.
@@ -56,6 +78,9 @@ node src/cli.mjs --prune --yes      # apply it
 
 ### UI
 
+`npm start -- <pr-url>` does analyse + serve + open in one step. To serve what is already stored
+without re-analysing anything:
+
 ```bash
 npm run serve            # http://127.0.0.1:4173
 ```
@@ -85,8 +110,11 @@ warm   1s   graph from cache (107 nodes, 226 edges)
 ```
 
 A cache-served run restores the graph's own summary too — blast-radius bounds, truncations,
-resolution health, processor status — so its disclosures are identical to a fresh run's. `--no-cache`
-forces re-resolution.
+resolution health, processor status — so its disclosures are identical to a fresh run's.
+
+The bounds an analysis ran under are part of its cache identity. Asking for a wider analysis than
+the cached one (`--max-symbols 40` against a graph built at 20) re-resolves and says so, rather than
+handing back a more bounded result than you asked for. `--no-cache` always re-resolves.
 
 ### Review progress
 

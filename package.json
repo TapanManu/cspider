@@ -9,7 +9,8 @@
     "test": "node test/diff.test.mjs && node test/compat.test.mjs && node test/graph.test.mjs && node test/store.test.mjs && node test/source.test.mjs && node test/server.test.mjs",
     "review": "node src/cli.mjs",
     "probe": "node probe/probe.mjs",
-    "serve": "node src/server/serve.mjs"
+    "serve": "node src/server/serve.mjs",
+    "start": "node src/open.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.1",
@@ -21,5 +22,8 @@
     "tree-sitter-java@0.23.5": true,
     "better-sqlite3@13.0.1": true,
     "tree-sitter@0.21.1": true
+  },
+  "bin": {
+    "cspider": "src/open.mjs"
   }
 }

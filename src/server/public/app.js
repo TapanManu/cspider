@@ -32,14 +32,21 @@ async function init() {
   }
   const picker = $('#prPicker');
   picker.innerHTML = prs.map((p) => `<option value="${esc(p.id)}">${esc(p.id)} — ${esc(p.title ?? '')}</option>`).join('');
-  picker.onchange = () => selectPr(picker.value);
+  picker.onchange = () => {
+    selectPr(picker.value);
+    // Keep the URL shareable and reload-safe.
+    history.replaceState(null, '', `?pr=${encodeURIComponent(picker.value)}`);
+  };
 
   $('#orderMode').onchange = () => loadOrder();
   $('#fit').onclick = () => state.cy?.fit(undefined, 30);
   for (const id of ['#edgeCalls', '#edgeTests', '#showContext']) $(id).onchange = applyFilters;
   $('#markBtn').onclick = toggleReviewed;
 
-  await selectPr(prs[0].id);
+  const wanted = new URLSearchParams(location.search).get('pr');
+  const initial = prs.some((p) => p.id === wanted) ? wanted : prs[0].id;
+  picker.value = initial;
+  await selectPr(initial);
 }
 
 async function selectPr(prId) {

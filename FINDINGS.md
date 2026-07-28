@@ -505,3 +505,24 @@ was caught only by checking a count against what it should have been, never by t
 Server tests assert the contract that matters most: a truncated or degraded analysis is reported as
 such, an unresolved PR returns `resolved: false` rather than an empty graph, and only edges with both
 endpoints are served while the rest are counted.
+
+## Finding F15 — the graph cache ignored the bounds the analysis ran under
+
+Running the one-command flow on `sedai-simulation-server#244` with `--max-symbols 40` returned the
+graph cached from an earlier `--max-symbols 20` run — **17 symbols still UNKNOWN**, silently, because
+the cache was keyed on `head_sha` alone.
+
+A graph built at `maxSymbols=20` is not an answer to a request for 40. The bounds are part of the
+analysis's identity, in the same way the head SHA is: both determine what the result actually
+contains. Reusing across them returns a more bounded answer than the caller asked for, and the
+UNKNOWN markers make it look like a property of the code rather than of the request.
+
+Fixed by recording `{maxSymbols, depth, base}` in the graph summary and reusing a cached graph only
+when its bounds are **at least as wide** as the ones now requested; otherwise it re-resolves and says
+why. Re-run at 40: 74 queries, 189 CALLS edges, **zero UNKNOWN**.
+
+This is the fifth finding of the same shape (F12, F13, F14, F15, and the v3 disclosure loss). Every
+one was a case where the tool produced a confident-looking answer that was quietly narrower or wrong,
+and none surfaced as an error. The recurring lesson is that for this kind of tool, correctness
+includes *the identity of the question asked* — caching, truncating, or degrading without carrying
+that identity forward is indistinguishable from lying.

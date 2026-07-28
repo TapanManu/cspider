@@ -244,8 +244,27 @@ if (has('resolve')) {
   for (const a of analyses) {
     // A graph cached for this exact head SHA is content-addressed, so reusing it is safe — and
     // it is the difference between seconds and minutes on a monorepo.
+    // Requested bounds are part of the cache identity. A cached graph is reusable only if it was
+    // built with bounds at least as wide as the ones now asked for.
+    a.params = {
+      maxSymbols: Number(flag('max-symbols', 40)),
+      depth: Number(flag('depth', 2)),
+      base: !has('no-base'),
+    };
     if (!has('no-cache')) {
-      const cached = loadGraph(db, a.prId, a.meta.headRefOid);
+      const prevMeta = loadGraphMeta(db, a.prId, a.meta.headRefOid);
+      const prev = prevMeta?.params ?? null;
+      const wideEnough = prev
+        && prev.maxSymbols >= a.params.maxSymbols
+        && prev.depth >= a.params.depth
+        && (prev.base || !a.params.base);
+      if (prev && !wideEnough) {
+        process.stderr.write(C.yellow(
+          `${a.key}: cached graph was built with maxSymbols=${prev.maxSymbols} depth=${prev.depth}` +
+          ` base=${prev.base}; you asked for maxSymbols=${a.params.maxSymbols} depth=${a.params.depth}` +
+          ` base=${a.params.base} — re-resolving\n`));
+      }
+      const cached = wideEnough ? loadGraph(db, a.prId, a.meta.headRefOid) : null;
       if (cached) {
         a.graph = cached;
         a.fromGraphCache = true;
