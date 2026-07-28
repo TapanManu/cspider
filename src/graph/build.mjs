@@ -401,9 +401,12 @@ export async function expandBlastRadius(graph, resolver, opts = {}) {
         const fromId = existingChanged?.id ?? id;
 
         if (!existingChanged && !graph.nodes.has(id)) {
+          const enclOwner = encl.name.includes('.')
+            ? encl.name.split('.').slice(0, -1).join('.') : '';
+          const enclSimple = encl.name.split('.').pop();
           graph.nodes.set(id, {
             id,
-            fqn: `${encl.name}${encl.detail || ''}`,
+            fqn: `${enclOwner ? `${enclOwner}#` : ''}${enclSimple}${paramsOf(encl)}`,
             kind: encl.kind === 9 ? 'CONSTRUCTOR' : 'METHOD',
             path: site.path,
             changeKind: 'UNCHANGED',

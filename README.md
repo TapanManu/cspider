@@ -85,20 +85,32 @@ without re-analysing anything:
 npm run serve            # http://127.0.0.1:4173
 ```
 
-Three synchronised panes over the persisted analyses — the server never starts a language server,
-so it is instant:
+Three panes, in the order a review actually happens:
 
-- **change units** — ordered by file, severity, or callers-first (topological), with broken and
-  unknown badges and a reviewed toggle
-- **blast radius** — a canvas where colour is change kind, size is risk, dashed outlines are
-  unchanged context nodes, red edges are broken calls and dashed blue are test-covers; filter by
-  edge type, hide context nodes
-- **node facts** — signature, visibility, annotations, deltas, risk components, before/after source,
-  and **call-site excerpts pulled from the calling file** with UPDATED/BROKEN/SAFE verdicts
+**1. Files** — changes grouped by file, each row showing what *kind* of change it is as chips
+(`signature`, `visibility`, `annotation`, `throws`, `body`), its caller count, a risk bar, and a
+broken badge. You can see whether a signature moved without clicking anything.
 
-Selecting in either the list or the graph selects in both. Disclosure banners sit above everything:
-degraded resolution, expansion truncation, unresolved symbols, missing changed-line data, stale
-review marks. A bounded analysis is never shown as a complete one.
+**2. Impact** — an **ego view**, not a whole-PR graph. Selecting a change lays out fixed lanes:
+
+```
+   TESTS        CALLED BY        THIS CHANGE        CALLS
+   (10)           (12)                              (2)
+```
+
+Positions are computed rather than force-simulated, so labels never collide and the picture is
+stable between selections. Click any node to re-centre on it. With nothing selected you get a
+file-level overview sized by risk. Red edges are broken calls, dashed blue are test coverage,
+dashed outlines are unchanged context pulled in for reach.
+
+**3. Change** — signature change first (parameter-level for long lists, so a 16-argument
+constructor shows `+ SessionClusterResolver` rather than two unreadable walls), then every call site
+inlined **from the calling file** with its UPDATED/BROKEN/SAFE verdict, then a unified diff with
+runs of unchanged lines collapsed, then facts, deltas and risk components.
+
+Disclosure banners sit above everything: degraded resolution, expansion truncation, unresolved
+symbols, missing changed-line data, stale review marks. A bounded analysis is never shown as a
+complete one.
 
 ### Graph cache
 

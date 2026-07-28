@@ -41,6 +41,12 @@ const readBody = (req) => new Promise((resolve) => {
 
 const clonePathFor = (cacheDir, nwo) => join(cacheDir, 'clones', nwo.replace('/', '__'));
 
+const dedupeById = (list) => {
+  const seen = new Map();
+  for (const x of list) if (!seen.has(x.id)) seen.set(x.id, x);
+  return [...seen.values()];
+};
+
 export function createApiServer({ cacheDir, dbPath }) {
   const db = openDb(dbPath);
 
@@ -102,6 +108,119 @@ export function createApiServer({ cacheDir, dbPath }) {
       };
     },
 
+    'GET /api/pr/:prId/files': ({ params }) => {
+      const data = loadPr(params.prId);
+      if (!data) return { __status: 404, error: 'unknown PR' };
+      const { units, graph, reviewed } = data;
+      const byPath = new Map();
+      for (const u of units) {
+        if (!byPath.has(u.path)) {
+          byPath.set(u.path, {
+            path: u.path, units: [], added: 0, removed: 0, modified: 0, moved: 0,
+            risk: 0, broken: 0, unknown: 0, reviewed: 0, noise: 0,
+          });
+        }
+        const f = byPath.get(u.path);
+        const n = graph?.nodes.get(u.id);
+        const rv = reviewed.state.get(u.id);
+        if (u.noise.length) f.noise++;
+        else {
+          f.units.push({
+            id: u.id, fqn: u.fqn, name: u.fqn.split('#').pop() || u.fqn,
+            owner: (u.fqn.split('#')[0] || '').split('.').pop(),
+            kind: u.kind, changeKind: u.changeKind,
+            deltaTypes: u.deltas.map((d) => d.type),
+            signatureChange: u.signatureChange ?? null,
+            severity: u.severity?.total ?? 0, risk: n?.risk?.total ?? null,
+            fanIn: n?.fanIn?.count ?? null, fanInKind: n?.fanIn?.kind ?? null,
+            broken: n?.break?.verdicts?.BROKEN ?? 0,
+            unknown: n?.unknown?.reason ?? null,
+            reviewed: !!rv?.reviewed, stale: !!rv?.stale,
+          });
+          f[{ ADDED: 'added', REMOVED: 'removed', MODIFIED: 'modified', MOVED: 'moved', RENAMED: 'moved' }[u.changeKind] ?? 'modified']++;
+          f.risk = Math.max(f.risk, n?.risk?.total ?? u.severity?.total ?? 0);
+          f.broken += n?.break?.verdicts?.BROKEN ?? 0;
+          if (n?.unknown) f.unknown++;
+          if (rv?.reviewed) f.reviewed++;
+        }
+      }
+      const files = [...byPath.values()]
+        .filter((f) => f.units.length > 0)
+        .sort((a, b) => b.broken - a.broken || b.risk - a.risk || a.path.localeCompare(b.path));
+      for (const f of files) f.units.sort((a, b) => b.broken - a.broken || (b.risk ?? b.severity) - (a.risk ?? a.severity));
+      return { files, totalFiles: files.length, suppressed: [...byPath.values()].reduce((n2, f) => n2 + f.noise, 0) };
+    },
+
+    /**
+     * Ego network for one node: who calls it, what it reaches, one hop each way. This is what a
+     * reviewer actually asks when they click something — a whole-PR force layout cannot answer it.
+     */
+    'GET /api/pr/:prId/ego': ({ params, query }) => {
+      const data = loadPr(params.prId);
+      if (!data) return { __status: 404, error: 'unknown PR' };
+      const { units, graph, reviewed } = data;
+      if (!query.id) return { __status: 400, error: 'id query parameter required' };
+      const centre = graph?.nodes.get(query.id);
+      if (!centre) return { __status: 404, error: 'unknown node' };
+
+      const unitById = new Map(units.map((u) => [u.id, u]));
+      const brief = (n, role) => {
+        const u = unitById.get(n.id);
+        const rv = reviewed.state.get(n.id);
+        return {
+          id: n.id, role,
+          fqn: n.fqn,
+          name: (n.fqn.includes('#') ? n.fqn.split('#').pop() : n.fqn).replace(/\s*:.*$/, ''),
+          owner: n.fqn.includes('#') ? n.fqn.split('#')[0].split('.').pop() : '',
+          path: n.path, kind: n.kind, origin: n.origin, changeKind: n.changeKind,
+          risk: n.risk?.total ?? u?.severity?.total ?? 0,
+          broken: n.break?.verdicts?.BROKEN ?? 0,
+          unknown: n.unknown?.reason ?? null,
+          reviewed: !!rv?.reviewed,
+          test: !!n.test,
+        };
+      };
+
+      const verdictAt = new Map((centre.break?.detail ?? []).map((d) => [`${d.path}:${d.line}`, d.verdict]));
+      const callers = [];
+      const callees = [];
+      for (const e of graph.edges) {
+        if (e.type !== 'CALLS') continue;
+        if (e.to === centre.id && e.from && graph.nodes.has(e.from)) {
+          callers.push({
+            ...brief(graph.nodes.get(e.from), 'caller'),
+            via: e.evidence?.[0] ?? null,
+            verdict: e.verdict ?? verdictAt.get(`${e.evidence?.[0]?.path}:${e.evidence?.[0]?.line}`) ?? null,
+          });
+        } else if (e.from === centre.id && e.to && graph.nodes.has(e.to)) {
+          callees.push({ ...brief(graph.nodes.get(e.to), 'callee'), via: e.evidence?.[0] ?? null });
+        }
+      }
+      const tests = graph.edges
+        .filter((e) => e.type === 'TEST_COVERS' && e.to === centre.id && e.from && graph.nodes.has(e.from))
+        .map((e) => ({ ...brief(graph.nodes.get(e.from), 'test'), via: e.evidence?.[0] ?? null }));
+
+      // Call sites with no enclosing member still exist and must be visible, just not as nodes.
+      const orphanSites = (centre.callers ?? []).filter((c) =>
+        !callers.some((k) => k.via?.path === c.path && k.via?.line === c.line));
+
+      return {
+        centre: brief(centre, 'centre'),
+        callers: dedupeById(callers),
+        callees: dedupeById(callees),
+        tests: dedupeById(tests),
+        orphanSites,
+        counts: {
+          callers: dedupeById(callers).length,
+          callees: dedupeById(callees).length,
+          tests: dedupeById(tests).length,
+          orphanSites: orphanSites.length,
+          resolvedCallers: centre.fanIn?.count ?? null,
+          fanInKind: centre.fanIn?.kind ?? null,
+        },
+      };
+    },
+
     'GET /api/pr/:prId/graph': ({ params }) => {
       const data = loadPr(params.prId);
       if (!data) return { __status: 404, error: 'unknown PR' };
@@ -138,12 +257,16 @@ export function createApiServer({ cacheDir, dbPath }) {
       };
     },
 
-    'GET /api/pr/:prId/node/:nodeId': ({ params }) => {
+    // Node ids embed a file path (e.g. ctx:backend/src/.../Foo.java#Bar.baz(X, Y)), so they can
+    // never be a URL path segment — the router split on '/' and every context node 404'd.
+    'GET /api/pr/:prId/node': ({ params, query }) => {
+      params = { ...params, nodeId: query.id };
       const data = loadPr(params.prId);
       if (!data) return { __status: 404, error: 'unknown PR' };
       const { pr, units, graph, reviewed } = data;
+      if (!params.nodeId) return { __status: 400, error: 'id query parameter required' };
       const node = graph?.nodes.get(params.nodeId);
-      if (!node) return { __status: 404, error: 'unknown node' };
+      if (!node) return { __status: 404, error: `unknown node: ${params.nodeId}` };
       const unit = units.find((u) => u.id === params.nodeId) ?? null;
       const clone = clonePathFor(cacheDir, pr.nwo);
 

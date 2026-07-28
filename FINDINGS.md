@@ -526,3 +526,48 @@ one was a case where the tool produced a confident-looking answer that was quiet
 and none surfaced as an error. The recurring lesson is that for this kind of tool, correctness
 includes *the identity of the question asked* — caching, truncating, or degrading without carrying
 that identity forward is indistinguishable from lying.
+
+## UI v1 was unusable — what the screenshots showed, and the redesign
+
+Opened on `sedai-simulation-server#244` the first UI failed in four ways at once:
+
+1. **The graph was a hairball.** A `cose` force layout over 107 nodes produced overlapping labels
+   and drifting clusters. It answered no question a reviewer has.
+2. **The node panel showed “Failed to fetch”** for most nodes — a real bug, below.
+3. **No indication of what changed.** The list showed truncated fully-qualified names and a bare
+   number. Whether a signature moved was invisible until something was clicked.
+4. **No files.** A review starts from “which files changed”, and the flat symbol list never said.
+
+### Finding F16 — node ids contain slashes, so they can never be a URL path segment
+
+Context node ids are of the form
+`ctx:backend/src/main/java/org/sedai/controller/SessionController.java#SessionController.createSession(CreateSessionRequest)`.
+The router split the path on `/` and compared segment counts, so **every context node 404'd** — which
+is what "Failed to fetch" was. Moved to `?id=`, with a regression test using an id containing both
+slashes and parentheses.
+
+### The redesign
+
+**Ego lanes instead of a global graph.** The question a reviewer asks on clicking something is "who
+calls this, and what does it reach". That is a one-hop question, and a whole-PR layout is the wrong
+instrument for it. Selecting a change now lays out four fixed lanes — TESTS · CALLED BY · THIS
+CHANGE · CALLS — at computed positions. Nothing is simulated, so labels never collide and the
+picture is *stable between selections*, which is what makes two symbols comparable. Clicking any
+node re-centres. With nothing selected, a file-level overview sized by risk.
+
+**Files first.** The left pane groups by file with per-kind counts (`+2 −3 ~6`), a broken badge, and
+a reviewed fraction. Each change carries chips for its delta types, so the *kind* of change is
+legible without interaction.
+
+**A real diff.** v1 showed two raw panes of source and left the reader to spot the difference —
+the one job the tool exists to do for them. Now an LCS unified diff with runs of unchanged lines
+collapsed to `⋯ N unchanged lines`.
+
+**Parameter-level signature changes.** A 16-argument constructor rendered twice in full is noise.
+Long signatures now show only what moved (`+ SessionClusterResolver`, `− …`) with the full text on
+hover.
+
+Also fixed: context node FQNs were built as `name + LSP detail`, producing
+`createSession(CreateSessionRequest) : ResponseEntity<…>.SessionController.createSession` once
+parsed. They now use the same `Owner#name(params)` shape as change units, so every consumer parses
+them uniformly.

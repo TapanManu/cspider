@@ -103,11 +103,46 @@ await t('graph exposes only drawable edges and counts the rest', async () => {
 
 await t('node detail inlines the call site with its verdict and reasons', async () => {
   const { server, seeded } = boot();
-  const { body } = await call(server, 'GET', `/api/pr/${ENC}/node/${encodeURIComponent(seeded.method.id)}`);
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/node?id=${encodeURIComponent(seeded.method.id)}`);
   assert.equal(body.callers.length, 1);
   assert.equal(body.callers[0].verdict, 'BROKEN');
   assert.match(body.callers[0].reasons[0], /parameters changed/);
   assert.equal(body.callerSummary.BROKEN, 1);
+});
+
+// A node id embeds a file path, so it can never be a URL path segment: the router split on '/'
+// and every context node 404'd. This pins the query-parameter form.
+await t('a node id containing slashes and parens resolves', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cspider-srv-'));
+  const { server, db } = createApiServer({ cacheDir: dir, dbPath: join(dir, 'db.sqlite') });
+  const s2 = seed(db);
+  const ctxId = 'ctx:backend/src/main/java/org/acme/Caller.java#Caller.calls(UUID, Map<String,String>)';
+  db.prepare(`INSERT INTO nodes (node_id, pr_id, head_sha, fqn, kind, path, origin, change_kind)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(ctxId, PRID, 'h1', 'Caller#calls(UUID,Map)', 'METHOD',
+      'backend/src/main/java/org/acme/Caller.java', 'CONTEXT', 'UNCHANGED');
+  const { status, body } = await call(server, 'GET', `/api/pr/${ENC}/node?id=${encodeURIComponent(ctxId)}`);
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.node.origin, 'CONTEXT');
+});
+
+await t('the ego endpoint returns callers, callees and tests around one node', async () => {
+  const { server, seeded } = boot();
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/ego?id=${encodeURIComponent(seeded.method.id)}`);
+  assert.ok(body.centre, 'has a centre');
+  assert.ok(Array.isArray(body.callers) && Array.isArray(body.callees) && Array.isArray(body.tests));
+  assert.equal(typeof body.counts.callers, 'number');
+});
+
+await t('files endpoint groups changes by file with per-kind counts', async () => {
+  const { server } = boot();
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/files`);
+  assert.ok(body.files.length >= 1);
+  const f = body.files[0];
+  assert.ok(f.path.endsWith('.java'));
+  assert.ok(f.units.length >= 1);
+  assert.equal(typeof f.added + typeof f.removed + typeof f.modified, 'numbernumbernumber');
+  assert.ok(f.units[0].deltaTypes, 'a unit carries its delta types for chips');
 });
 
 console.log('\nserver — disclosures travel with the payload (8.13)');

@@ -1,8 +1,17 @@
-// cspider UI — tasks 8.7 (facts panel), 8.8 (canvas), 8.9 (ordered list), 8.11 (shared
-// selection), 8.12 (edge filtering), 8.13 (disclosure banners).
+// cspider UI.
 //
-// One rule governs the whole surface: anything the analysis did not establish must LOOK
-// unestablished. UNKNOWN is rendered, truncation is rendered, an absent side of a diff says why.
+// Two design decisions drive everything here, both learned from the first version being unusable:
+//
+//  1. A whole-PR force layout is a hairball. 107 nodes with overlapping labels answers no question.
+//     The graph is therefore EGO-CENTRIC: pick a change, and see its callers, itself, and its
+//     callees as fixed lanes. Positions are computed, never simulated, so labels never collide.
+//  2. A review starts from files, not from a flat symbol list. The left pane groups by file and
+//     shows what kind of change each symbol carries as chips, so nothing needs to be clicked to
+//     find out whether a signature moved.
+//
+// The invariant from the analysis layer still holds: anything not established must LOOK
+// unestablished. UNKNOWN is rendered with its reason, truncation is rendered, an absent side of a
+// diff says why.
 
 const $ = (s) => document.querySelector(s);
 const api = async (p) => {
@@ -11,263 +20,350 @@ const api = async (p) => {
   return r.json();
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const shortFqn = (f) => String(f ?? '').replace(/^([a-z0-9_]+\.)+/, (m) => m.split('.').filter(Boolean).map((s) => s[0]).join('.') + '.');
+const params = (s) => (s.match(/\(([^)]*)\)/)?.[1] ?? '');
+const bare = (name) => String(name ?? '').replace(/\(.*/, '');
 
 const COLOR = {
-  ADDED: '#4ec97a', REMOVED: '#e5626f', MODIFIED: '#e0b341',
-  MOVED: '#4aa8e0', RENAMED: '#4aa8e0', UNCHANGED: '#5a6474',
+  ADDED: '#46c97a', REMOVED: '#ef5f6d', MODIFIED: '#e3b341',
+  MOVED: '#4aa8e0', RENAMED: '#4aa8e0', UNCHANGED: '#4a5260',
+};
+const DELTA_CHIP = {
+  SIGNATURE: ['sig', 'signature'], VISIBILITY: ['vis', 'visibility'],
+  THROWS: ['thr', 'throws'], ANNOTATION: ['ann', 'annotation'],
+  MODIFIER: ['', 'modifier'], BODY: ['', 'body'],
 };
 
-const state = { prId: null, pr: null, graph: null, order: null, selected: null, cy: null };
+const S = { prId: null, pr: null, files: null, selected: null, cy: null, mode: 'overview' };
 
-// ------------------------------------------------------------------ boot
-init().catch((e) => { $('#banners').innerHTML = banner('bad', 'Failed to load', e.message); });
+init().catch((e) => { $('#banners').innerHTML = banner('bad', 'Failed to load', esc(e.message)); });
 
 async function init() {
   const { prs } = await api('/api/prs');
   if (prs.length === 0) {
-    $('#banners').innerHTML = banner('info', 'No analysed PRs yet',
-      'Run <code>npm run review -- &lt;pr-url&gt; --resolve</code>, then reload.');
+    $('#banners').innerHTML = banner('info', 'Nothing analysed yet',
+      'Run <code>npm start -- &lt;pr-url&gt;</code> first.');
     return;
   }
   const picker = $('#prPicker');
   picker.innerHTML = prs.map((p) => `<option value="${esc(p.id)}">${esc(p.id)} — ${esc(p.title ?? '')}</option>`).join('');
   picker.onchange = () => {
-    selectPr(picker.value);
-    // Keep the URL shareable and reload-safe.
     history.replaceState(null, '', `?pr=${encodeURIComponent(picker.value)}`);
+    selectPr(picker.value);
   };
 
-  $('#orderMode').onchange = () => loadOrder();
-  $('#fit').onclick = () => state.cy?.fit(undefined, 30);
-  for (const id of ['#edgeCalls', '#edgeTests', '#showContext']) $(id).onchange = applyFilters;
+  $('#filter').oninput = renderFiles;
+  $('#showTests').onchange = () => (S.selected ? focus(S.selected) : null);
+  $('#overviewBtn').onclick = () => { S.selected = null; renderFiles(); overview(); };
+  $('#fit').onclick = () => S.cy?.fit(undefined, 40);
   $('#markBtn').onclick = toggleReviewed;
 
   const wanted = new URLSearchParams(location.search).get('pr');
-  const initial = prs.some((p) => p.id === wanted) ? wanted : prs[0].id;
-  picker.value = initial;
-  await selectPr(initial);
+  picker.value = prs.some((p) => p.id === wanted) ? wanted : prs[0].id;
+  await selectPr(picker.value);
 }
 
 async function selectPr(prId) {
-  state.prId = prId;
-  state.selected = null;
-  $('#detail').className = 'empty';
-  $('#detail').textContent = 'Select a node in the list or the graph.';
-  $('#markBtn').hidden = true;
-
-  state.pr = await api(`/api/pr/${encodeURIComponent(prId)}`);
+  S.prId = prId;
+  S.selected = null;
+  S.pr = await api(`/api/pr/${encodeURIComponent(prId)}`);
+  S.files = await api(`/api/pr/${encodeURIComponent(prId)}/files`);
   renderHead();
   renderBanners();
-  await Promise.all([loadOrder(), loadGraph()]);
+  renderFiles();
+  overview();
+  $('#detail').className = 'empty';
+  $('#detail').innerHTML = '<p>Pick a change on the left.</p>';
+  $('#markBtn').hidden = true;
 }
 
-// ------------------------------------------------------------------ header + banners (8.13)
+// ------------------------------------------------------------------ header / banners
 function renderHead() {
-  const c = state.pr.counts;
+  const c = S.pr.counts;
   $('#counts').innerHTML =
-    `<b>${c.units}</b> units · <b>${c.nodes}</b> nodes · <b>${c.edges}</b> edges` +
-    (c.broken ? ` · <b style="color:var(--broken)">${c.broken} broken</b>` : '') +
-    (c.unknown ? ` · <b style="color:var(--unknown)">${c.unknown} unknown</b>` : '');
-  renderProgress(state.pr.progress);
+    `<b>${S.files.totalFiles}</b> files · <b>${c.units}</b> changes` +
+    (c.broken ? ` · <b class="bad">${c.broken} broken</b>` : '') +
+    (c.unknown ? ` · <b class="warn">${c.unknown} unknown</b>` : '');
+  renderProgress(S.pr.progress);
 }
-
 function renderProgress(p) {
-  const filled = p.total ? Math.round((p.done / p.total) * 16) : 0;
-  $('#progress').innerHTML =
-    `reviewed ${'█'.repeat(filled)}${'·'.repeat(16 - filled)} ${p.done}/${p.total}` +
-    (p.stale ? ` <span style="color:var(--unknown)">${p.stale} stale</span>` : '');
+  $('#progress').textContent = `reviewed ${p.done}/${p.total}` + (p.stale ? ` · ${p.stale} stale` : '');
 }
-
-const banner = (cls, title, body) => `<div class="banner ${cls}"><b>${title}</b><span>${body}</span></div>`;
+const banner = (cls, t, b) => `<div class="banner ${cls}"><b>${t}</b><span>${b}</span></div>`;
 
 function renderBanners() {
-  const s = state.pr.status;
+  const s = S.pr.status;
   const out = [];
-
-  if (!s.resolved) {
-    out.push(banner('warn', 'Not resolved',
-      'This PR was analysed without <code>--resolve</code>: no callers, no break analysis, no blast radius.'));
-  }
+  if (!s.resolved) out.push(banner('warn', 'Not resolved', 'No callers or break analysis — re-run with <code>--resolve</code>.'));
   if (s.health && s.health.verdict !== 'clean') {
-    const cls = s.health.verdict === 'DEGRADED' ? 'bad' : 'warn';
-    out.push(banner(cls, `Resolution ${s.health.verdict}`,
-      `${s.health.unresolved} unresolved of ${s.health.errors} error(s). Edges are missing — the graph is incomplete.`));
+    out.push(banner(s.health.verdict === 'DEGRADED' ? 'bad' : 'warn', `Resolution ${s.health.verdict}`,
+      `${s.health.unresolved} unresolved of ${s.health.errors} error(s) — edges are missing.`));
   }
   if (s.blastRadius?.truncated?.length) {
-    const reasons = [...new Set(s.blastRadius.truncated.map((t) => t.reason))].join(', ');
     out.push(banner('warn', 'Expansion truncated',
-      `${s.blastRadius.truncated.length} point(s) hit a bound (${esc(reasons)}). Nodes beyond them were never explored.`));
+      `${s.blastRadius.truncated.length} point(s) hit a bound — nodes beyond them were never explored.`));
   }
-  if (s.truncations?.some((t) => t.reason === 'maxSymbols')) {
-    const n = s.truncations.filter((t) => t.reason === 'maxSymbols').reduce((a, t) => a + (t.omitted ?? 0), 0);
-    out.push(banner('warn', 'Symbols not resolved',
-      `${n} symbol(s) were beyond the resolution cap and are reported UNKNOWN, not safe.`));
-  }
+  const cap = (s.truncations ?? []).filter((t) => t.reason === 'maxSymbols').reduce((a, t) => a + (t.omitted ?? 0), 0);
+  if (cap) out.push(banner('warn', `${cap} symbols unresolved`, 'Beyond the resolution cap — reported UNKNOWN, not safe.'));
   if (s.touchedSource && s.touchedSource !== 'git') {
     out.push(banner(s.touchedSource === 'none' ? 'bad' : 'warn', 'Changed-line data',
-      s.touchedSource === 'none'
-        ? 'Unavailable — UPDATED cannot be distinguished from BROKEN.'
-        : 'Derived from GitHub patch rather than git; large diffs may be incomplete.'));
+      s.touchedSource === 'none' ? 'Unavailable — UPDATED cannot be told from BROKEN.' : 'From GitHub patch, not git.'));
   }
-  if (state.pr.progress.stale) {
-    out.push(banner('warn', 'Stale review marks',
-      `${state.pr.progress.stale} symbol(s) changed since they were marked reviewed.`));
-  }
+  if (S.pr.progress.stale) out.push(banner('warn', 'Stale marks', `${S.pr.progress.stale} reviewed symbol(s) changed since.`));
   $('#banners').innerHTML = out.join('');
 }
 
-// ------------------------------------------------------------------ ordered list (8.9)
-async function loadOrder() {
-  const mode = $('#orderMode').value;
-  state.order = await api(`/api/pr/${encodeURIComponent(state.prId)}/order?mode=${mode}`);
-  const list = $('#unitList');
-  list.innerHTML = state.order.units.map((u) => `
-    <li data-id="${esc(u.id)}" class="${u.reviewed ? 'done' : ''}">
-      <span class="tag ${esc(u.changeKind)}">${esc(u.changeKind[0])}</span>
-      <span class="uname" title="${esc(u.fqn)}">${esc(shortFqn(u.fqn))}
-        <span class="upath">${esc(u.path.split('/').pop())}</span></span>
-      ${u.broken ? `<span class="pill broken">${u.broken}✗</span>` : ''}
-      ${u.unknown ? '<span class="pill unknown">?</span>' : ''}
-      <span class="pill risk">${u.risk ?? u.severity}</span>
-    </li>`).join('');
-  for (const li of list.children) li.onclick = () => select(li.dataset.id, 'list');
-  if (state.selected) highlight(state.selected);
+// ------------------------------------------------------- files + changes (left)
+function renderFiles() {
+  const q = $('#filter').value.trim().toLowerCase();
+  const el = $('#fileList');
+  const files = S.files.files
+    .map((f) => ({ ...f, units: q ? f.units.filter((u) => (u.fqn + f.path).toLowerCase().includes(q)) : f.units }))
+    .filter((f) => f.units.length);
+
+  $('#filesTitle').textContent = `Files (${files.length})`;
+  el.innerHTML = files.map((f) => {
+    const parts = f.path.split('/');
+    const name = parts.pop();
+    const open = files.length <= 12 || f.broken || q;
+    return `
+      <div class="file ${open ? 'open' : ''}" data-path="${esc(f.path)}">
+        <div class="fileHd">
+          <span class="caret">${open ? '▾' : '▸'}</span>
+          <span class="fname mono">${esc(name)}</span>
+          <span class="fdir">${esc(parts.slice(-2).join('/'))}</span>
+          <span class="counts-mini">
+            ${f.added ? `<span class="a">+${f.added}</span>` : ''}
+            ${f.removed ? `<span class="r">−${f.removed}</span>` : ''}
+            ${f.modified ? `<span class="m">~${f.modified}</span>` : ''}
+          </span>
+          ${f.broken ? `<span class="chip broken">${f.broken}✗</span>` : ''}
+          ${f.unknown ? `<span class="chip unknown">${f.unknown}?</span>` : ''}
+          <span class="risk">${f.reviewed}/${f.units.length}</span>
+        </div>
+        <div class="units">${f.units.map(unitRow).join('')}</div>
+      </div>`;
+  }).join('') || '<div class="emptyImpact">Nothing matches that filter.</div>';
+
+  for (const hd of el.querySelectorAll('.fileHd')) {
+    hd.onclick = () => {
+      const f = hd.closest('.file');
+      f.classList.toggle('open');
+      f.querySelector('.caret').textContent = f.classList.contains('open') ? '▾' : '▸';
+    };
+  }
+  for (const row of el.querySelectorAll('.unit')) row.onclick = () => focus(row.dataset.id);
+  if (S.selected) markSelectedRow(S.selected);
 }
 
-// ------------------------------------------------------------------ canvas (8.8, 8.12)
-async function loadGraph() {
-  state.graph = await api(`/api/pr/${encodeURIComponent(state.prId)}/graph`);
-  if (!state.graph.resolved) {
-    $('#cy').innerHTML = '<div style="padding:20px;color:var(--faint)">No graph — this PR was analysed without --resolve.</div>';
-    $('#legend').innerHTML = '';
+function unitRow(u) {
+  const chips = [];
+  // The kind of change is visible without clicking — that was the biggest gap in v1.
+  for (const t of u.deltaTypes) {
+    const [cls, label] = DELTA_CHIP[t] ?? ['', t.toLowerCase()];
+    chips.push(`<span class="chip ${cls}">${esc(label)}</span>`);
+  }
+  if (u.fanIn !== null && u.fanIn !== undefined) {
+    chips.push(`<span class="chip fan">${u.fanIn} caller${u.fanIn === 1 ? '' : 's'}${u.fanInKind === 'INDIRECT' ? '*' : ''}</span>`);
+  }
+  if (u.broken) chips.push(`<span class="chip broken">${u.broken} broken</span>`);
+  if (u.unknown) chips.push('<span class="chip unknown">unknown</span>');
+
+  const risk = u.risk ?? u.severity ?? 0;
+  return `
+    <div class="unit ${u.reviewed ? 'done' : ''}" data-id="${esc(u.id)}" title="${esc(u.fqn)}">
+      <span class="ck ${esc(u.changeKind)}">${esc(u.changeKind[0])}</span>
+      <span class="nm"><span class="owner">${esc(u.owner ?? '')}.</span>${esc(bare(u.name))}<span class="owner">(${esc(params(u.name))})</span></span>
+      <span class="right">
+        <span class="riskbar ${risk >= 40 ? 'hi' : ''}"><i style="width:${Math.min(100, risk * 1.6)}%"></i></span>
+        <span class="risk">${risk}</span>
+      </span>
+      ${chips.length ? `<span class="meta">${chips.join('')}</span>` : ''}
+    </div>`;
+}
+
+function markSelectedRow(id) {
+  for (const r of $('#fileList').querySelectorAll('.unit')) r.classList.toggle('sel', r.dataset.id === id);
+  const sel = $('#fileList').querySelector('.unit.sel');
+  if (sel) { sel.closest('.file').classList.add('open'); sel.scrollIntoView({ block: 'nearest' }); }
+}
+
+// ------------------------------------------------- impact: file overview (default)
+function overview() {
+  S.mode = 'overview';
+  $('#impactTitle').textContent = 'Impact — overview';
+  $('#impactSub').textContent = 'files, sized by highest risk. Pick a change to see its callers.';
+  $('#overviewBtn').classList.add('on');
+
+  const files = S.files.files;
+  if (!files.length) { $('#cy').innerHTML = '<div class="emptyImpact">No changes to show.</div>'; return; }
+
+  const els = files.map((f, i) => ({
+    data: {
+      id: `f:${f.path}`, label: f.path.split('/').pop().replace(/\.java$/, ''),
+      risk: f.risk, broken: f.broken,
+      size: Math.max(30, Math.min(76, 30 + f.risk * 0.7)),
+      kind: f.broken ? 'REMOVED' : f.added > f.removed ? 'ADDED' : 'MODIFIED',
+    },
+    position: ringPos(i, files.length, 230),
+  }));
+
+  render(els, 'preset');
+  S.cy.on('tap', 'node', (ev) => {
+    const path = ev.target.id().slice(2);
+    const f = S.files.files.find((x) => x.path === path);
+    if (f?.units.length) focus(f.units[0].id);
+  });
+  $('#legend').innerHTML = [
+    '<i>each node is a changed file · size = highest risk in it</i>',
+    '<i style="color:var(--broken)">red = has broken call sites</i>',
+    '<i>click a file to focus its riskiest change</i>',
+  ].join('');
+}
+
+const ringPos = (i, n, r) => {
+  const a = (i / Math.max(1, n)) * Math.PI * 2 - Math.PI / 2;
+  return { x: Math.cos(a) * r, y: Math.sin(a) * r * 0.72 };
+};
+
+// --------------------------------------------- impact: ego lanes (on selection)
+async function focus(id) {
+  S.selected = id;
+  S.mode = 'focus';
+  $('#overviewBtn').classList.remove('on');
+  markSelectedRow(id);
+  renderDetail(id);
+
+  let ego;
+  try {
+    ego = await api(`/api/pr/${encodeURIComponent(S.prId)}/ego?id=${encodeURIComponent(id)}`);
+  } catch (e) {
+    $('#cy').innerHTML = `<div class="emptyImpact">Could not load impact: ${esc(e.message)}</div>`;
     return;
   }
 
-  const elements = [
-    ...state.graph.nodes.map((n) => ({
+  const showTests = $('#showTests').checked;
+  const tests = showTests ? ego.tests : [];
+  const c = ego.counts;
+
+  $('#impactTitle').textContent = 'Impact — focus';
+  $('#impactSub').textContent =
+    `${c.callers} caller${c.callers === 1 ? '' : 's'} · ${c.callees} callee${c.callees === 1 ? '' : 's'}` +
+    `${c.tests ? ` · ${c.tests} test${c.tests === 1 ? '' : 's'}` : ''}` +
+    `${c.orphanSites ? ` · ${c.orphanSites} site(s) outside any member` : ''}` +
+    `${c.fanInKind === 'INDIRECT' ? ' · fan-in is indirect' : ''}`;
+
+  // Fixed lanes. Nothing is simulated, so labels never overlap and the picture is stable
+  // between selections — you can compare two symbols without re-reading the layout.
+  const LANE = { test: -740, caller: -380, centre: 0, callee: 380 };
+  const GAP = 66;
+  const els = [];
+  const lane = (list, x, role) => {
+    const y0 = -((list.length - 1) * GAP) / 2;
+    list.forEach((n, i) => els.push({
       data: {
-        id: n.id, label: shortFqn(n.fqn).split('#').pop() || shortFqn(n.fqn),
-        changeKind: n.changeKind, origin: n.origin, risk: n.risk,
-        broken: n.broken, unknown: !!n.unknown, reviewed: n.reviewed,
-        // size encodes risk; a node is never smaller than legible
-        size: Math.max(16, Math.min(46, 16 + (n.risk ?? 0) * 0.5)),
+        id: n.id, label: `${n.owner ?? ''}\n${bare(n.name)}`, role,
+        kind: n.origin === 'CONTEXT' ? 'UNCHANGED' : n.changeKind,
+        origin: n.origin, broken: n.broken, unknown: !!n.unknown, reviewed: n.reviewed,
+        size: role === 'centre' ? 54 : Math.max(26, Math.min(48, 26 + (n.risk ?? 0) * 0.4)),
       },
-    })),
-    ...state.graph.edges.map((e) => ({
-      data: { id: e.id, source: e.source, target: e.target, type: e.type, verdict: e.verdict },
-    })),
-  ];
+      position: { x, y: y0 + i * GAP },
+    }));
+  };
+  lane(ego.callers, LANE.caller, 'caller');
+  lane([ego.centre], LANE.centre, 'centre');
+  lane(ego.callees, LANE.callee, 'callee');
+  lane(tests, LANE.test, 'test');
 
-  state.cy = cytoscape({
-    container: $('#cy'),
-    elements,
-    layout: { name: 'cose', animate: false, nodeRepulsion: 9000, idealEdgeLength: 90, padding: 30 },
-    style: [
-      { selector: 'node', style: {
-        'background-color': (n) => COLOR[n.data('changeKind')] ?? '#5a6474',
-        width: 'data(size)', height: 'data(size)',
-        label: 'data(label)', 'font-size': 9, 'font-family': 'ui-monospace, monospace',
-        color: '#8b95a6', 'text-valign': 'bottom', 'text-margin-y': 3,
-        'text-max-width': 120, 'text-wrap': 'ellipsis',
-        'border-width': 2, 'border-color': 'transparent',
-      } },
-      // CONTEXT nodes are unchanged code pulled in for reach — visually secondary, never
-      // mistakable for something the PR touched.
-      { selector: 'node[origin = "CONTEXT"]', style: {
-        'background-opacity': 0.25, 'border-width': 1, 'border-style': 'dashed',
-        'border-color': '#5a6474', shape: 'round-rectangle',
-      } },
-      { selector: 'node[?broken]', style: { 'border-color': '#ff5f6b', 'border-width': 3 } },
-      { selector: 'node[?unknown]', style: { 'border-color': '#d99a2b', 'border-width': 2, 'border-style': 'dotted' } },
-      { selector: 'node[?reviewed]', style: { 'background-opacity': 0.35, opacity: 0.55 } },
-      { selector: 'node.sel', style: { 'border-color': '#7aa2f7', 'border-width': 4, 'border-style': 'solid' } },
-      { selector: 'node.dim', style: { opacity: 0.12 } },
+  const present = new Set(els.map((e) => e.data.id));
+  for (const n of ego.callers) if (present.has(n.id)) {
+    els.push({ data: { id: `c-${n.id}`, source: n.id, target: ego.centre.id, verdict: n.verdict, type: 'CALLS' } });
+  }
+  for (const n of ego.callees) if (present.has(n.id)) {
+    els.push({ data: { id: `o-${n.id}`, source: ego.centre.id, target: n.id, type: 'CALLS' } });
+  }
+  for (const n of tests) if (present.has(n.id)) {
+    els.push({ data: { id: `t-${n.id}`, source: n.id, target: ego.centre.id, type: 'TEST_COVERS' } });
+  }
 
-      { selector: 'edge', style: {
-        width: 1, 'line-color': '#3a4250', 'curve-style': 'bezier',
-        'target-arrow-shape': 'triangle', 'target-arrow-color': '#3a4250', 'arrow-scale': 0.7,
-      } },
-      { selector: 'edge[verdict = "BROKEN"]', style: { 'line-color': '#ff5f6b', 'target-arrow-color': '#ff5f6b', width: 2 } },
-      { selector: 'edge[verdict = "UPDATED"]', style: { 'line-color': '#4ec97a', 'target-arrow-color': '#4ec97a' } },
-      // Non-resolved edge kinds must not look like resolved ones.
-      { selector: 'edge[type = "TEST_COVERS"]', style: { 'line-style': 'dashed', 'line-color': '#4aa8e0', 'target-arrow-color': '#4aa8e0' } },
-      { selector: 'edge.hidden', style: { display: 'none' } },
-      { selector: 'edge.hl', style: { width: 3, 'line-color': '#7aa2f7', 'target-arrow-color': '#7aa2f7', 'z-index': 99 } },
-    ],
+  // Lane captions as unclickable label nodes, so the picture explains itself.
+  const top = -(Math.max(ego.callers.length, ego.callees.length, tests.length, 1) * GAP) / 2 - 60;
+  const caption = (x, text, n) => els.push({
+    data: { id: `lbl:${text}`, label: n === null ? text : `${text} (${n})`, isLabel: true },
+    position: { x, y: top }, selectable: false, grabbable: false,
   });
+  if (tests.length) caption(LANE.test, 'TESTS', tests.length);
+  caption(LANE.caller, 'CALLED BY', ego.callers.length);
+  caption(LANE.centre, 'THIS CHANGE', null);
+  caption(LANE.callee, 'CALLS', ego.callees.length);
 
-  state.cy.on('tap', 'node', (ev) => select(ev.target.id(), 'graph'));
-  state.cy.on('tap', (ev) => { if (ev.target === state.cy) clearSelection(); });
+  render(els, 'preset');
+  S.cy.getElementById(ego.centre.id).addClass('centre');
+  S.cy.on('tap', 'node', (ev) => {
+    if (ev.target.data('isLabel')) return;
+    const nid = ev.target.id();
+    if (nid !== S.selected) focus(nid);
+  });
 
   $('#legend').innerHTML = [
-    ...['ADDED', 'REMOVED', 'MODIFIED', 'MOVED'].map((k) => `<i><span class="swatch" style="background:${COLOR[k]}"></span>${k.toLowerCase()}</i>`),
-    '<i><span class="swatch" style="background:#5a6474;opacity:.4"></span>context (unchanged)</i>',
-    '<i style="color:#ff5f6b">▬ broken call</i>',
-    '<i style="color:#4aa8e0">╌ test-covers</i>',
-    '<i>size = risk</i>',
-    state.graph.undrawableEdges
-      ? `<i style="color:var(--unknown)">${state.graph.undrawableEdges} edge(s) not drawable (call site outside any member)</i>`
-      : '',
+    '<i><span class="sw" style="background:#46c97a"></span>added</i>',
+    '<i><span class="sw" style="background:#ef5f6d"></span>removed</i>',
+    '<i><span class="sw" style="background:#e3b341"></span>modified</i>',
+    '<i><span class="sw" style="background:#4a5260"></span>unchanged context</i>',
+    '<i style="color:var(--broken)">▬ broken call</i>',
+    '<i style="color:var(--moved)">╌ test covers</i>',
+    ego.orphanSites.length ? `<i style="color:var(--unknown)">${ego.orphanSites.length} call site(s) outside any member — listed on the right, not drawn</i>` : '',
+    '<i>click any node to re-centre</i>',
   ].join('');
-  applyFilters();
 }
 
-function applyFilters() {
-  if (!state.cy) return;
-  const calls = $('#edgeCalls').checked;
-  const tests = $('#edgeTests').checked;
-  const ctx = $('#showContext').checked;
-  state.cy.batch(() => {
-    state.cy.edges().forEach((e) => {
-      const t = e.data('type');
-      const on = (t === 'CALLS' && calls) || (t === 'TEST_COVERS' && tests);
-      e.toggleClass('hidden', !on);
-    });
-    state.cy.nodes().forEach((n) => {
-      n.style('display', (!ctx && n.data('origin') === 'CONTEXT') ? 'none' : 'element');
-    });
+function render(elements, layoutName) {
+  $('#cy').innerHTML = '';
+  S.cy = cytoscape({
+    container: $('#cy'),
+    elements,
+    layout: { name: layoutName, fit: true, padding: 45 },
+    minZoom: 0.25,
+    maxZoom: 2.5,
+    style: [
+      { selector: 'node', style: {
+        'background-color': (n) => COLOR[n.data('kind')] ?? '#4a5260',
+        width: 'data(size)', height: 'data(size)',
+        label: 'data(label)', 'font-size': 10, 'font-family': 'ui-monospace, monospace',
+        color: '#c3cad6', 'text-valign': 'bottom', 'text-margin-y': 5,
+        'text-wrap': 'wrap', 'text-max-width': 150, 'line-height': 1.25,
+        'border-width': 2, 'border-color': 'rgba(0,0,0,.35)',
+        'text-background-color': '#0e1014', 'text-background-opacity': 0.72,
+        'text-background-padding': 2, 'text-background-shape': 'roundrectangle',
+      } },
+      { selector: 'node[?isLabel]', style: {
+        'background-opacity': 0, 'border-width': 0, width: 1, height: 1,
+        label: 'data(label)', 'font-size': 10, 'font-weight': 'bold',
+        color: '#7f8a9b', 'text-valign': 'center', 'letter-spacing': 1.5,
+        'text-background-opacity': 0, events: 'no',
+      } },
+      { selector: 'node[origin = "CONTEXT"]', style: {
+        'background-opacity': 0.4, 'border-style': 'dashed', 'border-color': '#5d6674',
+        shape: 'round-rectangle',
+      } },
+      { selector: 'node.centre', style: {
+        'border-width': 4, 'border-color': '#7aa2f7', 'font-size': 12, 'font-weight': 'bold',
+      } },
+      { selector: 'node[?broken]', style: { 'border-color': '#ff4d5a', 'border-width': 3 } },
+      { selector: 'node[?unknown]', style: { 'border-style': 'dotted', 'border-color': '#e0a02b', 'border-width': 3 } },
+      { selector: 'node[?reviewed]', style: { opacity: 0.5 } },
+
+      { selector: 'edge', style: {
+        width: 1.6, 'line-color': '#4a5464', 'curve-style': 'bezier',
+        'target-arrow-shape': 'triangle', 'target-arrow-color': '#4a5464', 'arrow-scale': 0.85,
+      } },
+      { selector: 'edge[verdict = "BROKEN"]', style: { 'line-color': '#ff4d5a', 'target-arrow-color': '#ff4d5a', width: 3 } },
+      { selector: 'edge[verdict = "UPDATED"]', style: { 'line-color': '#46c97a', 'target-arrow-color': '#46c97a' } },
+      { selector: 'edge[type = "TEST_COVERS"]', style: { 'line-style': 'dashed', 'line-color': '#4aa8e0', 'target-arrow-color': '#4aa8e0' } },
+    ],
   });
 }
 
-// ------------------------------------------------------- shared selection (8.11)
-function highlight(id) {
-  for (const li of $('#unitList').children) li.classList.toggle('sel', li.dataset.id === id);
-  if (!state.cy) return;
-  state.cy.batch(() => {
-    state.cy.elements().removeClass('sel hl dim');
-    const n = state.cy.getElementById(id);
-    if (!n || n.empty()) return;
-    n.addClass('sel');
-    const nbr = n.closedNeighborhood();
-    state.cy.nodes().difference(nbr.nodes()).addClass('dim');
-    nbr.edges().addClass('hl');
-  });
-}
-
-function clearSelection() {
-  state.selected = null;
-  state.cy?.elements().removeClass('sel hl dim');
-  for (const li of $('#unitList').children) li.classList.remove('sel');
-  $('#markBtn').hidden = true;
-  $('#detail').className = 'empty';
-  $('#detail').textContent = 'Select a node in the list or the graph.';
-}
-
-async function select(id, from) {
-  state.selected = id;
-  highlight(id);
-  if (from === 'list') {
-    const n = state.cy?.getElementById(id);
-    if (n && !n.empty()) state.cy.animate({ center: { eles: n } }, { duration: 180 });
-  } else {
-    const li = [...$('#unitList').children].find((x) => x.dataset.id === id);
-    li?.scrollIntoView({ block: 'nearest' });
-  }
-  await renderDetail(id);
-}
-
-// ------------------------------------------------------------------ facts panel (8.7)
+// ------------------------------------------------------------------ detail (right)
 async function renderDetail(id) {
   const el = $('#detail');
   el.className = '';
@@ -275,11 +371,8 @@ async function renderDetail(id) {
 
   let d;
   try {
-    d = await api(`/api/pr/${encodeURIComponent(state.prId)}/node/${encodeURIComponent(id)}`);
-  } catch (e) {
-    el.innerHTML = `<span class="absent">${esc(e.message)}</span>`;
-    return;
-  }
+    d = await api(`/api/pr/${encodeURIComponent(S.prId)}/node?id=${encodeURIComponent(id)}`);
+  } catch (e) { el.innerHTML = `<span class="absent">${esc(e.message)}</span>`; return; }
 
   const n = d.node;
   const u = d.unit;
@@ -287,101 +380,196 @@ async function renderDetail(id) {
   btn.hidden = !u;
   btn.textContent = n.reviewed ? 'unmark reviewed' : 'mark reviewed';
 
-  const parts = [];
-  parts.push(`<h3>${esc(shortFqn(n.fqn))}</h3><div class="sub">${esc(n.path ?? '')}</div>`);
+  const out = [];
+  const name = (n.fqn.split('#').pop() || n.fqn);
+  const owner = (n.fqn.split('#')[0] || '').split('.').pop();
+  out.push(`<div class="dTitle">${esc(owner)}<span style="color:var(--faint)">#</span>${esc(name)}</div>`);
+  out.push(`<div class="dPath">${esc(n.path ?? '')}${u ? ` · ${esc(u.changeKind)}` : ''}</div>`);
 
   if (n.unknown) {
-    parts.push(`<div class="unknownBox"><b>UNKNOWN</b> — ${esc(n.unknown.reason ?? n.unknown)}<div class="note">Not analysed. This is not the same as “no impact”.</div></div>`);
+    out.push(`<div class="unknownBox"><b>UNKNOWN</b> — ${esc(n.unknown.reason ?? n.unknown)}
+      <span class="sm">Not analysed. That is not the same as “no impact”.</span></div>`);
   }
 
-  // facts
+  // The single most useful fact, when present, goes first.
+  if (u?.signatureChange) out.push(sigChangeHtml(u.signatureChange));
+
+  const v = d.callerSummary;
+  if (v && (v.BROKEN || v.UPDATED || v.SAFE)) {
+    out.push(`<h4>Call sites <span class="n">${v.BROKEN ? `${v.BROKEN} broken · ` : ''}${v.UPDATED} updated · ${v.SAFE} safe</span></h4>`);
+  } else if (d.callers?.length) {
+    out.push(`<h4>Call sites <span class="n">${d.callers.length}</span></h4>`);
+  }
+  if (d.callers?.length) {
+    const sorted = [...d.callers].sort((a, b) => (b.verdict === 'BROKEN') - (a.verdict === 'BROKEN'));
+    for (const c of sorted) {
+      const lines = (c.excerpt?.lines ?? []).map((l) =>
+        `<div class="${l.isCallSite ? 'del' : 'ctx'}"><span class="ln">${l.line}</span>${esc(l.text)}</div>`).join('');
+      out.push(`
+        <div class="site ${c.verdict === 'BROKEN' ? 'brokenSite' : ''}">
+          <div class="hd">
+            ${c.verdict ? `<span class="v ${esc(c.verdict)}">${esc(c.verdict)}</span>` : ''}
+            <span class="loc">${esc(c.path.split('/').slice(-2).join('/'))}:${c.line}</span>
+            ${c.side === 'base' ? '<span class="note">base image</span>' : ''}
+          </div>
+          ${c.excerpt?.absent ? '<div class="absent" style="padding:5px 7px">source unavailable at this revision</div>'
+            : `<pre class="diff">${lines}</pre>`}
+          ${c.reasons?.length ? `<div class="note" style="padding:0 7px 5px">${esc(c.reasons.join('; '))}</div>` : ''}
+        </div>`);
+    }
+  }
+
+  if (d.source) {
+    out.push('<h4>Diff</h4>');
+    out.push(renderDiff(d.source.before, d.source.after));
+  }
+
   const kv = [];
-  kv.push(['kind', `${esc(n.kind ?? '')} · ${esc(n.changeKind ?? '')}${n.origin === 'CONTEXT' ? ' · context' : ''}`]);
   if (u?.symbol) {
     kv.push(['signature', esc(u.symbol.signature)]);
     kv.push(['visibility', esc(u.symbol.visibility)]);
     if (u.symbol.annotations?.length) kv.push(['annotations', esc(u.symbol.annotations.join(' '))]);
     if (u.symbol.throws?.length) kv.push(['throws', esc(u.symbol.throws.join(', '))]);
   }
-  if (n.fanIn) {
-    kv.push(['callers', `${n.fanIn.count}${n.fanIn.kind === 'INDIRECT' ? ' <span style="color:var(--unknown)">(indirect)</span>' : ''}`]);
-  }
-  kv.push(['tests reach', n.testCovered === null || n.testCovered === undefined
-    ? '<span class="absent">unknown</span>'
+  if (n.fanIn) kv.push(['callers', `${n.fanIn.count}${n.fanIn.kind === 'INDIRECT' ? ' (indirect)' : ''}`]);
+  kv.push(['tests reach', n.testCovered == null ? '<span class="absent">unknown</span>'
     : (n.testCovered ? 'yes' : '<span style="color:var(--unknown)">no</span>')]);
-  parts.push(`<h4>Facts</h4><dl class="kv">${kv.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>`);
-
-  if (n.fanIn?.note) parts.push(`<div class="note">ⓘ ${esc(n.fanIn.note)}</div>`);
+  out.push(`<h4>Facts</h4><dl class="kv">${kv.map(([k, val]) => `<dt>${k}</dt><dd>${val}</dd>`).join('')}</dl>`);
+  if (n.fanIn?.note) out.push(`<div class="note">ⓘ ${esc(n.fanIn.note)}</div>`);
 
   if (u?.deltas?.length) {
-    parts.push('<h4>Deltas</h4>');
+    out.push('<h4>Deltas</h4>');
     for (const dl of u.deltas) {
-      if (dl.type === 'BODY') { parts.push('<div class="delta"><b>body</b> changed</div>'); continue; }
-      parts.push(`<div class="delta"><b>${esc(dl.type.toLowerCase())}</b> ${esc(fmt(dl.before))} → ${esc(fmt(dl.after))}</div>`);
+      if (dl.type === 'BODY') { out.push('<div class="comp"><span>body changed</span></div>'); continue; }
+      out.push(`<div class="comp"><span>${esc(dl.type.toLowerCase())}</span><span>${esc(fmt(dl.before))} → ${esc(fmt(dl.after))}</span></div>`);
     }
   }
-
   if (n.risk?.components?.length) {
-    parts.push(`<h4>Risk ${n.risk.total}</h4>`);
+    out.push(`<h4>Risk <span class="n">${n.risk.total}</span></h4>`);
     for (const c of n.risk.components) {
-      parts.push(`<div class="comp"><span>${esc(c.name)} +${c.points}</span><span>${esc(c.detail ?? '')}</span></div>`);
+      out.push(`<div class="comp"><span>${esc(c.name)} +${c.points}</span><span>${esc(c.detail ?? '')}</span></div>`);
     }
   }
 
-  // before/after (8.2 groundwork — plain, syntax-free rendering for now)
-  if (d.source) {
-    parts.push('<h4>Before → after</h4>');
-    for (const [side, label] of [['before', 'before'], ['after', 'after']]) {
-      const s = d.source[side];
-      if (!s) continue;
-      parts.push(`<div class="side">${label}${s.startLine ? ` · lines ${s.startLine}–${s.endLine}` : ''}</div>`);
-      parts.push(s.absent
-        ? `<div class="absent">${esc(s.reason ?? 'absent')}</div>`
-        : `<pre>${esc(s.text)}</pre>`);
-    }
-  }
-
-  // call sites, inlined from the CALLING file (8.5)
-  if (d.callers?.length) {
-    const v = d.callerSummary;
-    parts.push(`<h4>Call sites (${d.callers.length})${v ? ` — ${v.BROKEN} broken · ${v.UPDATED} updated · ${v.SAFE} safe` : ''}</h4>`);
-    const sorted = [...d.callers].sort((a, b) =>
-      (b.verdict === 'BROKEN') - (a.verdict === 'BROKEN'));
-    for (const c of sorted) {
-      const lines = (c.excerpt?.lines ?? []).map((l) =>
-        `<span class="${l.isCallSite ? 'cs' : ''}">${String(l.line).padStart(5)} ${esc(l.text)}</span>`).join('\n');
-      parts.push(`
-        <div class="caller">
-          <div class="hd">
-            ${c.verdict ? `<span class="v ${esc(c.verdict)}">${esc(c.verdict)}</span>` : ''}
-            <span class="loc" title="${esc(c.path)}:${c.line}">${esc(c.path.split('/').slice(-2).join('/'))}:${c.line}</span>
-            ${c.side === 'base' ? '<span class="note">base image</span>' : ''}
-          </div>
-          ${c.excerpt?.absent ? '<div class="absent" style="padding:4px 6px">source unavailable at this revision</div>' : `<pre>${lines}</pre>`}
-          ${c.reasons?.length ? `<div class="note" style="padding:0 6px 4px">${esc(c.reasons.join('; '))}</div>` : ''}
-        </div>`);
-    }
-  } else if (n.fanIn) {
-    parts.push('<h4>Call sites</h4><div class="absent">No callers resolved.</div>');
-  }
-
-  el.innerHTML = parts.join('');
+  el.innerHTML = out.join('');
 }
 
-const fmt = (v) => (Array.isArray(v) ? (v.length ? v.join(' ') : '∅') : (v ?? '∅'));
+const fmt = (x) => (Array.isArray(x) ? (x.length ? x.join(' ') : '∅') : (x ?? '∅'));
 
-// ------------------------------------------------------------------ reviewed toggle (7.3)
+/**
+ * A 15-parameter constructor rendered twice in full is noise. Diff the parameter lists and show
+ * only what moved, with the full signatures available on hover.
+ */
+function sigChangeHtml(sc) {
+  const split = (s) => (s.match(/\(([^)]*)\)/)?.[1] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const a = split(sc.before);
+  const b = split(sc.after);
+  const ret = (s) => (s.match(/^(\S+)\s/)?.[1] ?? '');
+  const nameOf = (s) => (s.match(/([\w$]+)\s*\(/)?.[1] ?? '');
+
+  const added = b.filter((x) => !a.includes(x));
+  const removed = a.filter((x) => !b.includes(x));
+  const retChanged = ret(sc.before) !== ret(sc.after);
+
+  // Small lists are clearer shown whole.
+  if (a.length <= 4 && b.length <= 4) {
+    return `<div class="sigChange" title="${esc(sc.before)} → ${esc(sc.after)}">
+      <span class="was">${esc(sc.before)}</span><span class="arrow">→</span>
+      <span class="now">${esc(sc.after)}</span></div>`;
+  }
+
+  const bits = [];
+  if (retChanged) bits.push(`<div>returns <span class="was">${esc(ret(sc.before))}</span>
+    <span class="arrow">→</span><span class="now">${esc(ret(sc.after))}</span></div>`);
+  for (const x of added) bits.push(`<div><span class="now">+ ${esc(x)}</span></div>`);
+  for (const x of removed) bits.push(`<div><span class="was">− ${esc(x)}</span></div>`);
+  if (!bits.length) bits.push('<div>parameter order changed</div>');
+
+  return `<div class="sigChange" title="${esc(sc.before)}&#10;→&#10;${esc(sc.after)}">
+    <div style="color:var(--dim);margin-bottom:4px">${esc(nameOf(sc.after))}(…) · ${a.length} → ${b.length} params</div>
+    ${bits.join('')}</div>`;
+}
+
+/**
+ * Unified line diff with collapsed context. Two raw panes of source, which is what v1 showed, made
+ * the reader find the change themselves — the one job the tool exists to do for them.
+ */
+function renderDiff(before, after) {
+  if (!before && !after) return '<div class="absent">no source</div>';
+  if (before?.absent && after?.absent) return `<div class="absent">${esc(before.reason ?? 'absent')}</div>`;
+  if (before?.absent) {
+    return `<div class="absent">${esc(before.reason ?? 'did not exist before')}</div>
+      <pre class="diff">${(after.text ?? '').split('\n').map((l, i) =>
+        `<div class="add"><span class="ln">${(after.startLine ?? 1) + i}</span>${esc(l)}</div>`).join('')}</pre>`;
+  }
+  if (after?.absent) {
+    return `<div class="absent">${esc(after.reason ?? 'removed')}</div>
+      <pre class="diff">${(before.text ?? '').split('\n').map((l, i) =>
+        `<div class="del"><span class="ln">${(before.startLine ?? 1) + i}</span>${esc(l)}</div>`).join('')}</pre>`;
+  }
+
+  const a = (before.text ?? '').split('\n');
+  const b = (after.text ?? '').split('\n');
+  const ops = lcsDiff(a, b);
+
+  // Collapse runs of unchanged lines longer than 2×context.
+  const CTX = 3;
+  const keep = new Set();
+  ops.forEach((op, i) => {
+    if (op.t === '=') return;
+    for (let k = Math.max(0, i - CTX); k <= Math.min(ops.length - 1, i + CTX); k++) keep.add(k);
+  });
+
+  const rows = [];
+  let hidden = 0;
+  ops.forEach((op, i) => {
+    if (!keep.has(i)) { hidden++; return; }
+    if (hidden) { rows.push(`<div class="gap">    ⋯ ${hidden} unchanged line${hidden === 1 ? '' : 's'}</div>`); hidden = 0; }
+    const cls = op.t === '+' ? 'add' : op.t === '-' ? 'del' : 'ctx';
+    const ln = op.t === '-' ? (before.startLine ?? 1) + op.ai : (after.startLine ?? 1) + op.bi;
+    const sign = op.t === '=' ? ' ' : op.t;
+    rows.push(`<div class="${cls}"><span class="ln">${ln}</span>${sign} ${esc(op.line)}</div>`);
+  });
+  if (hidden) rows.push(`<div class="gap">    ⋯ ${hidden} unchanged line${hidden === 1 ? '' : 's'}</div>`);
+  if (!ops.some((o) => o.t !== '=')) rows.push('<div class="gap">    identical — the change is elsewhere in the file</div>');
+
+  return `<pre class="diff">${rows.join('')}</pre>`;
+}
+
+// Classic LCS table; symbol bodies are small enough that O(n·m) is irrelevant here.
+function lcsDiff(a, b) {
+  const n = a.length; const m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0; let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ t: '=', line: a[i], ai: i, bi: j }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: '-', line: a[i], ai: i, bi: j }); i++; }
+    else { out.push({ t: '+', line: b[j], ai: i, bi: j }); j++; }
+  }
+  while (i < n) { out.push({ t: '-', line: a[i], ai: i, bi: j }); i++; }
+  while (j < m) { out.push({ t: '+', line: b[j], ai: i, bi: j }); j++; }
+  return out;
+}
+
+// ------------------------------------------------------------------ reviewed
 async function toggleReviewed() {
-  if (!state.selected) return;
-  const li = [...$('#unitList').children].find((x) => x.dataset.id === state.selected);
-  const wasDone = li?.classList.contains('done');
-  const r = await fetch(`/api/pr/${encodeURIComponent(state.prId)}/reviewed`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ unitId: state.selected, reviewed: !wasDone }),
+  if (!S.selected) return;
+  const row = $('#fileList').querySelector(`.unit[data-id="${cssEsc(S.selected)}"]`);
+  const was = row?.classList.contains('done');
+  const r = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/reviewed`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ unitId: S.selected, reviewed: !was }),
   }).then((x) => x.json());
-  if (r.progress) renderProgress(r.progress);
-  li?.classList.toggle('done', !wasDone);
-  state.cy?.getElementById(state.selected)?.data('reviewed', !wasDone);
-  $('#markBtn').textContent = !wasDone ? 'unmark reviewed' : 'mark reviewed';
+  if (r.progress) { renderProgress(r.progress); S.pr.progress = r.progress; }
+  row?.classList.toggle('done', !was);
+  $('#markBtn').textContent = !was ? 'unmark reviewed' : 'mark reviewed';
+  S.files = await api(`/api/pr/${encodeURIComponent(S.prId)}/files`);
 }
+
+const cssEsc = (s) => (window.CSS?.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&'));
