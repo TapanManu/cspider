@@ -1,0 +1,23 @@
+{
+  "name": "cspider",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "PR semantic change reader \u2014 change units, typed deltas, and cross-repo producer/consumer links.",
+  "scripts": {
+    "jdtls": "bash scripts/fetch-jdtls.sh",
+    "test": "node test/diff.test.mjs && node test/compat.test.mjs && node test/graph.test.mjs",
+    "review": "node src/cli.mjs",
+    "probe": "node probe/probe.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.1",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-java": "^0.23.5"
+  },
+  "allowScripts": {
+    "tree-sitter-java@0.23.5": true,
+    "better-sqlite3@13.0.1": true,
+    "tree-sitter@0.21.1": true
+  }
+}
