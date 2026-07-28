@@ -43,9 +43,29 @@ npm run review -- https://github.com/<owner>/<repo>/pull/<n> [more PR urls...]
   --topo            order by callers-before-callees
   --depth N         blast-radius depth (default 2, 0 disables)
   --max-nodes N     node ceiling for expansion (default 400)
+  --reviewed <fqn>  mark matching change unit(s) reviewed (substring match)
+  --unreviewed <fqn> clear the reviewed mark
+  --progress        show review progress only
   --json <path>     write the full analysis
   --debug           stack traces on ingest failure
+
+node src/cli.mjs --prune            # report reclaimable cache
+node src/cli.mjs --prune --yes      # apply it
 ```
+
+### Review progress
+
+Progress persists in SQLite at `.cache/cspider.db`, keyed by change-unit id — which is stable
+across line movement, so a rebase or an edit elsewhere in the file does not lose it:
+
+```
+   reviewed: ████████████████████ 2/2
+  ✓+ ADDED    sev  20  o.s.m.s.s.ExtendSessionRequest class
+```
+
+A mark is retained only while the symbol's own content hash matches. If the symbol itself changed,
+the mark is reported **stale** rather than carried forward — telling you that you had already
+reviewed code you have never seen would be worse than losing the mark.
 
 With `--resolve` the report gains a break-analysis section listing call sites that may not have
 been updated — the highest-value output of the tool:
@@ -72,11 +92,13 @@ Give it every PR of one logical change and the cross-PR section will link them:
 ## Tests
 
 ```bash
-npm test    # 61 cases across three suites:
+npm test    # 79 cases across four suites:
             #   diff    — parsing, delta types, change kinds, rename/move, noise
             #   compat  — signature compatibility and BROKEN/UPDATED/SAFE verdicts
             #   graph   — break analysis, indirect fan-in, UNKNOWN handling, and
             #             blast-radius bounds, all against a stub resolver
+            #   store   — reviewed-state retention across head advances, and the
+            #             per-artifact-class cache eviction policy
 ```
 
 A real PR that updated all of its call sites cannot exercise `BROKEN`, so the verdict logic is
@@ -89,7 +111,8 @@ proven against a stub resolver rather than only against live repositories.
 | `src/ingest/` | GitHub via `gh`, clone/worktree, payload cache, build-root detection |
 | `src/java/` | tree-sitter symbol extraction and the change-unit differ |
 | `src/review/` | provisional severity, ordering, cross-repo correlation |
-| `src/graph/` | nodes and edges, break analysis, indirect fan-in, risk |
+| `src/graph/` | nodes and edges, break analysis, indirect fan-in, risk, blast radius |
+| `src/store/` | SQLite schema, analysis persistence, reviewed state, cache retention |
 | `src/cli.mjs` | the review command |
 | `src/lsp.mjs` | JDT LS client + launcher, with annotation-processor agent attachment |
 | `probe/` | the feasibility walking skeleton — answered Q1–Q3, kept for reference |
@@ -107,5 +130,7 @@ behind the out-of-process plugin contract in Phase B, which is what makes Go and
   but `documentSymbol` still does not enumerate them.
 - Blast radius is capped at depth 2 with a node ceiling and a query budget. Whenever a bound
   bites it is reported — the graph is never quietly presented as complete.
-- Nothing is persisted between runs except the payload/clone caches.
+- Cache retention is split by artifact class: clones are pruned only explicitly, worktrees and
+  indexes expire on a 7-day TTL plus an LRU size cap, and reviewer-authored data is never evicted.
+  `--prune` reports before it deletes; `--yes` applies.
 - The design lives in `openspec/changes/pr-semantic-graph-reader/`; `openspec validate` covers it.

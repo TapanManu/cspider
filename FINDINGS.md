@@ -363,3 +363,42 @@ Seven regression tests pin the bounds, including that depth terminates on a cycl
 that would otherwise expand forever, and that a context node whose own callers were not resolved is
 marked UNKNOWN rather than appearing to be a leaf. A leaf that is really an unexplored frontier is
 the same lie as a silent truncation.
+
+## Persistence (group 1) and reviewed state (6.11)
+
+SQLite at `.cache/cspider.db`. The design decision that matters is **what is keyed by what**:
+
+| Data | Key | Retention |
+|---|---|---|
+| PR facts, change units, nodes, edges | pr + `head_sha` | derived and rebuildable; cached to skip re-resolution |
+| reviewed state, drafts | pr + **unit_id** (not `head_sha`) | never evicted, never rebuilt |
+
+Reviewed state is keyed by change-unit id, which excludes path and line, so a mark survives a
+rebase or an edit elsewhere in the file. It is retained only while the unit's **content hash**
+still matches — signature, visibility, modifiers, annotations, throws, body. If the symbol itself
+changed, the mark is reported **stale** rather than carried forward.
+
+That asymmetry is the whole point. Losing a mark costs a re-read; carrying one forward tells the
+reviewer they have already checked code they have never seen. Marks for symbols no longer in the PR
+are counted as **orphaned** rather than silently dropped.
+
+### Cache retention measured
+
+`--prune` on the working cache after analysing four PRs:
+
+```
+  index       7 entries     1.9GB
+  clone       5 entries     174MB  (never evicted)
+  worktree    7 entries     113MB
+  payload     4 entries     108KB
+  total                     2.1GB
+```
+
+Language-server indexes are **90% of the footprint** while clones — the most expensive thing to
+lose at 143s to re-clone — are 8%. That is exactly the asymmetry R4 split on, and a single LRU pool
+over both would have evicted the wrong thing. Prune is dry-run by default and reports what would go
+and how much it would reclaim before deleting anything.
+
+18 store tests, including: a mark survives line movement, a mark goes stale on a visibility change
+alone, TTL expiry evicts the index but never the clone, the size cap spares clones, and reviewer
+state survives an eviction that clears every evictable artefact.

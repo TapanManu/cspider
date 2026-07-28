@@ -6,7 +6,7 @@
   "description": "PR semantic change reader \u2014 change units, typed deltas, and cross-repo producer/consumer links.",
   "scripts": {
     "jdtls": "bash scripts/fetch-jdtls.sh",
-    "test": "node test/diff.test.mjs && node test/compat.test.mjs && node test/graph.test.mjs",
+    "test": "node test/diff.test.mjs && node test/compat.test.mjs && node test/graph.test.mjs && node test/store.test.mjs",
     "review": "node src/cli.mjs",
     "probe": "node probe/probe.mjs"
   },

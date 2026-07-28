@@ -2,11 +2,11 @@
 
 - [ ] 1.1 Create the application repository skeleton: TypeScript monorepo with `host` (graph, risk, orchestration), `contract` (plugin contract types + conformance suite), `server` (local HTTP API), `ui` (React), and `plugins/java` packages
 - [ ] 1.2 Add dependencies: `better-sqlite3`, a JSON-RPC/LSP client library, `octokit`, React, Monaco editor, and a canvas graph renderer
-- [ ] 1.3 Define the SQLite schema for prs, change_units, nodes, edges, evidence, drafts, and reviewed_state, with migrations
-- [ ] 1.4 Implement the local cache directory layout and the R4 retention policy: clones pruned only explicitly; worktrees and indexes on TTL plus LRU under a size cap; API payloads on a short TTL; SHA-keyed results never time-expired; drafts and reviewed state never evicted
-- [ ] 1.5 Implement the explicit prune command that reports what will be removed and the space reclaimed before removing it
+- [x] 1.3 Define the SQLite schema for prs, change_units, nodes, edges, evidence, drafts, and reviewed_state, with migrations
+- [x] 1.4 Implement the local cache directory layout and the R4 retention policy: clones pruned only explicitly; worktrees and indexes on TTL plus LRU under a size cap; API payloads on a short TTL; SHA-keyed results never time-expired; drafts and reviewed state never evicted
+- [x] 1.5 Implement the explicit prune command that reports what will be removed and the space reclaimed before removing it
 - [ ] 1.6 Add the CLI entry point that accepts PR URLs, runs the pipeline, and serves the local UI
-- [ ] 1.7 Set up GitHub token loading from environment or a local config file, with a startup validation check
+- [x] 1.7 Set up GitHub token loading from environment or a local config file, with a startup validation check
 
 ## 2. PR Ingestion
 
@@ -86,9 +86,9 @@
 - [x] 6.8 Implement the risk scorer with the five default change-derived components and per-component contributions exposed
 - [x] 6.9 Implement historical defect density as an opt-in per-repository scoring component, disabled by default
 - [x] 6.10 Implement topological review ordering over CALLS edges with cycles broken by descending risk, plus a risk-order alternative
-- [ ] 6.11 Implement reviewed-state persistence with retention across head advances for content-unchanged nodes
+- [x] 6.11 Implement reviewed-state persistence with retention across head advances for content-unchanged nodes
 - [x] 6.12 Implement noise suppression for import-only, formatting-only, comment-only, and generated files, always reporting the suppressed count
-- [ ] 6.13 Implement per-PR graph scoping with unconditional overlap disclosure on every affected PR, plus the opt-in merged view with cross-PR node merging and single-PR filtering
+- [x] 6.13 Implement per-PR graph scoping with unconditional overlap disclosure on every affected PR, plus the opt-in merged view with cross-PR node merging and single-PR filtering
 - [x] 6.14 Write graph tests covering bounds, truncation disclosure, break classification, and ordering determinism
 
 ## 7. Local Server API

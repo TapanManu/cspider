@@ -16,6 +16,9 @@ import { provisionalSeverity, orderUnits, bySeverity, correlateCrossRepo } from 
 import { JavaResolver, jdtlsAvailable } from './java/resolve.mjs';
 import { buildGraph, scoreRisk, coChangedEdges, topologicalOrder, expandBlastRadius } from './graph/build.mjs';
 import { changedLines, filesWithoutPatch } from './ingest/changedLines.mjs';
+import { openDb } from './store/db.mjs';
+import { saveAnalysis, loadReviewed, markReviewed, unmarkReviewed, progress, contentHash } from './store/persist.mjs';
+import { scanCache, evictionPlan, applyEviction, humanBytes } from './store/retention.mjs';
 import { ensureWorktree } from './ingest/pr.mjs';
 
 const ROOT = presolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +28,44 @@ const argv = process.argv.slice(2);
 const urls = argv.filter((a) => a.startsWith('http'));
 const has = (f) => argv.includes(`--${f}`);
 const flag = (f, d) => { const i = argv.indexOf(`--${f}`); return i === -1 ? d : argv[i + 1]; };
+
+const DB_PATH = process.env.CSPIDER_DB || join(CACHE, 'cspider.db');
+
+if (argv.includes('--prune')) {
+  const db = openDb(DB_PATH);
+  const found = scanCache(db, CACHE);
+  const { plan, reclaim, protectedKinds } = evictionPlan(db, {
+    sizeCapBytes: Number(process.env.CSPIDER_CACHE_CAP ?? 20 * 1024 ** 3),
+  });
+
+  const byKind = new Map();
+  for (const f of found) {
+    const cur = byKind.get(f.kind) ?? { n: 0, bytes: 0 };
+    byKind.set(f.kind, { n: cur.n + 1, bytes: cur.bytes + f.bytes });
+  }
+  console.log(`cache at ${CACHE}`);
+  for (const [kind, v] of [...byKind].sort((a, b) => b[1].bytes - a[1].bytes)) {
+    const prot = protectedKinds.includes(kind) ? '  (never evicted)' : '';
+    console.log(`  ${kind.padEnd(9)} ${String(v.n).padStart(3)} entr(ies)  ${humanBytes(v.bytes).padStart(8)}${prot}`);
+  }
+  const total = [...byKind.values()].reduce((n, v) => n + v.bytes, 0);
+  console.log(`  ${'total'.padEnd(9)} ${''.padStart(3)}            ${humanBytes(total).padStart(8)}\n`);
+
+  if (plan.length === 0) {
+    console.log('nothing to reclaim — all evictable entries are within TTL and under the size cap.');
+  } else {
+    console.log(`${plan.length} cache entr(ies), ${humanBytes(reclaim)} reclaimable:`);
+    for (const r of plan) console.log(`  ${r.kind.padEnd(9)} ${humanBytes(r.bytes).padStart(7)}  ${r.key}  — ${r.reason}`);
+    console.log(`\nnever evicted: ${protectedKinds.join(', ')}, reviewed state, drafts`);
+    if (argv.includes('--yes')) {
+      const res = applyEviction(db, plan, { dryRun: false });
+      console.log(`\nremoved ${res.removed} entr(ies), reclaimed ${humanBytes(res.bytes)}`);
+    } else {
+      console.log('\nnothing deleted. re-run with --prune --yes to apply.');
+    }
+  }
+  process.exit(0);
+}
 
 if (urls.length === 0) {
   console.error(`cspider — PR semantic change reader (Phase A)
@@ -40,6 +81,10 @@ options:
   --depth N         blast-radius depth (default 2, 0 disables expansion)
   --max-nodes N     total node ceiling for expansion (default 400)
   --max-symbols N   cap symbols resolved per PR (default 40)
+  --reviewed <fqn>  mark matching change unit(s) reviewed (substring match) and exit
+  --unreviewed <fqn> clear the reviewed mark for matching unit(s) and exit
+  --progress        show review progress only
+  --prune           report reclaimable cache, then delete with --yes
   --json <path>     write the full analysis as JSON
 `);
   process.exit(2);
@@ -60,6 +105,7 @@ const KIND_TAG = {
   RENAMED: C.cyan('→ RENAMED '),
 };
 
+const db = openDb(DB_PATH);
 const analyses = [];
 const failures = [];
 
@@ -138,6 +184,51 @@ function ensureWorktreeLite(clone, sha) {
   try { git(['cat-file', '-e', `${sha}^{commit}`]); } catch { git(['fetch', 'origin', sha]); }
   git(['worktree', 'add', '--detach', dir, sha]);
   return dir;
+}
+
+// ---------------------------------------------------- persist + reviewed state (1.3, 6.11)
+for (const a of analyses) {
+  a.prId = `${a.pr.nwo}#${a.pr.number}`;
+  a.reviewed = loadReviewed(db, a.prId, a.units);
+  a.progress = progress(a.units, a.reviewed);
+}
+
+// --reviewed / --unreviewed act on the ingested units and exit; no resolution needed.
+for (const [fl, fn] of [['reviewed', markReviewed], ['unreviewed', null]]) {
+  if (!has(fl)) continue;
+  const needle = flag(fl, '');
+  if (!needle || needle.startsWith('--')) {
+    console.error(`--${fl} needs a substring to match against change-unit FQNs`);
+    process.exit(2);
+  }
+  let n = 0;
+  for (const a of analyses) {
+    for (const u of a.units) {
+      if (!u.fqn.toLowerCase().includes(needle.toLowerCase())) continue;
+      if (fn) markReviewed(db, a.prId, u); else unmarkReviewed(db, a.prId, u.id);
+      console.log(`${fn ? 'reviewed' : 'cleared '}  ${u.fqn}  [${a.key}]`);
+      n++;
+    }
+  }
+  if (n === 0) console.log(`no change unit matched "${needle}"`);
+  else {
+    for (const a of analyses) {
+      const r = loadReviewed(db, a.prId, a.units);
+      const pg = progress(a.units, r);
+      console.log(`\n${a.key}: ${pg.done}/${pg.total} reviewed`);
+    }
+  }
+  process.exit(0);
+}
+
+if (has('progress')) {
+  for (const a of analyses) {
+    const pg = a.progress;
+    console.log(`${a.key.padEnd(32)} ${pg.done}/${pg.total} reviewed` +
+      (pg.stale ? `  ${pg.stale} stale (symbol changed since review)` : '') +
+      (pg.orphaned ? `  ${pg.orphaned} orphaned (symbol no longer in the PR)` : ''));
+  }
+  process.exit(0);
 }
 
 // ------------------------------------------------------------------ resolve
@@ -233,6 +324,22 @@ if (has('resolve')) {
   }
 }
 
+// 6.13: overlap is disclosed on every affected PR's own view, not only in a merged view.
+{
+  const byFqn = new Map();
+  for (const a of analyses) {
+    for (const u of a.units) {
+      if (!byFqn.has(u.fqn)) byFqn.set(u.fqn, new Set());
+      byFqn.get(u.fqn).add(a.key);
+    }
+  }
+  for (const a of analyses) {
+    a.overlaps = a.units
+      .filter((u) => (byFqn.get(u.fqn)?.size ?? 0) > 1)
+      .map((u) => ({ fqn: u.fqn, others: [...byFqn.get(u.fqn)].filter((k) => k !== a.key) }));
+  }
+}
+
 // ------------------------------------------------------------------ report
 
 for (const a of analyses) {
@@ -251,6 +358,12 @@ for (const a of analyses) {
   console.log(C.dim(`   ${a.counts.javaFiles} java of ${a.counts.changedFiles} changed files` +
     `  ·  build root: ${a.buildRoots.primary}`));
 
+  if (a.overlaps?.length) {
+    console.log(C.yellow(`   ⚠ ${a.overlaps.length} symbol(s) also changed by another ingested PR:`));
+    for (const o of a.overlaps.slice(0, 5)) {
+      console.log(C.yellow(`     ${shortFqn(o.fqn)} ${C.dim(`— also in ${o.others.join(', ')}`)}`));
+    }
+  }
   if (a.buildRoots.uncovered.length) {
     console.log(C.yellow(`   ⚠ not covered by the primary build root: ${a.buildRoots.uncovered.join(', ')}`));
   }
@@ -289,6 +402,14 @@ for (const a of analyses) {
     }
   }
 
+  const pg = a.progress;
+  if (pg.total) {
+    const bar = '█'.repeat(Math.round((pg.done / pg.total) * 20)).padEnd(20, '·');
+    console.log(C.dim(`   reviewed: ${bar} ${pg.done}/${pg.total}`) +
+      (pg.stale ? C.yellow(`  ${pg.stale} stale`) : '') +
+      (pg.orphaned ? C.dim(`  ${pg.orphaned} orphaned`) : ''));
+  }
+
   console.log(`\n   ${C.bold(`${shown.length} change unit(s)`)}` +
     (suppressed ? C.dim(`  (${suppressed} low-signal suppressed — --show-noise to see)`) : ''));
 
@@ -299,7 +420,9 @@ for (const a of analyses) {
       lastPath = u.path;
     }
     const sev = String(u.severity.total).padStart(3);
-    console.log(`   ${KIND_TAG[u.changeKind]} ${C.dim(`sev ${sev}`)}  ${shortFqn(u.fqn)} ${C.dim(u.kind.toLowerCase())}`);
+    const rv = a.reviewed?.state.get(u.id);
+    const mark = rv?.reviewed ? C.green('✓') : rv?.stale ? C.yellow('~') : ' ';
+    console.log(`  ${mark}${KIND_TAG[u.changeKind]} ${C.dim(`sev ${sev}`)}  ${shortFqn(u.fqn)} ${C.dim(u.kind.toLowerCase())}`);
     if (u.from) console.log(C.dim(`               from ${shortFqn(u.from.fqn)} @ ${u.from.path} ${u.confidence ? `(confidence ${u.confidence}%)` : ''}`));
     for (const d of u.deltas) {
       if (d.type === 'BODY') { console.log(C.dim('               body changed')); continue; }
@@ -419,6 +542,13 @@ for (const a of analyses) {
     }
   }
 }
+for (const a of analyses) {
+  try { saveAnalysis(db, a); } catch (e) {
+    console.error(C.yellow(`   ⚠ could not persist ${a.key}: ${e.message.split('\n')[0]}`));
+  }
+}
+scanCache(db, CACHE);
+
 const allUnknown = [];
 for (const a of analyses) {
   for (const n of (a.graph?.nodes.values() ?? [])) {
