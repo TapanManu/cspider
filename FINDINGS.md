@@ -341,3 +341,25 @@ Also landed from group 6: `CO_CHANGED` from git history (correlation, labelled a
 descending risk.
 
 Test suites: **54 cases** — 23 diff, 17 compat, 14 graph.
+
+## Blast radius (6.3, 6.4)
+
+Expansion adds CONTEXT nodes for the *members* that call the changed ones — resolved via
+`documentSymbol` and an innermost-range lookup, so a context node is a symbol rather than a file.
+A call site outside any member (field initialiser, static block) does not invent a node.
+
+Bounded three ways, and every bound that bites is recorded on the node it truncated:
+
+| Bound | Default | Why |
+|---|---|---|
+| depth | 2 | depth 3 on a high-fan-in service method produces a hairball no reviewer can use |
+| node ceiling | 400 | keeps the canvas interactive |
+| query budget | 300 | the real constraint — `references` measured ~11s/symbol on a monorepo vs ~0.4s on a small one |
+
+On `sedai-simulation-server#244`: **63 context nodes** (41 at depth 1, 22 at depth 2) and **244
+CALLS edges**, no truncation. That is an impact graph rather than a change list.
+
+Seven regression tests pin the bounds, including that depth terminates on a cyclic caller chain
+that would otherwise expand forever, and that a context node whose own callers were not resolved is
+marked UNKNOWN rather than appearing to be a leaf. A leaf that is really an unexplored frontier is
+the same lie as a silent truncation.

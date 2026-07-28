@@ -154,6 +154,50 @@ export class JavaResolver {
     return { path: this.#rel(arr[0].uri), line: arr[0].range.start.line + 1 };
   }
 
+  // Blast radius needs the *enclosing* symbol at a call site, not just the file and line —
+  // a CONTEXT node must be a symbol, or the graph degenerates into a file graph.
+  async documentSymbols(relPath) {
+    if (this.symbolCache?.has(relPath)) return this.symbolCache.get(relPath);
+    const uri = this.open(relPath);
+    if (!uri) return [];
+    this.queries++;
+    let res;
+    try {
+      res = await this.client.request('textDocument/documentSymbol', { textDocument: { uri } }, 60000);
+    } catch { return []; }
+
+    const flat = [];
+    const walk = (list, parent) => {
+      for (const sym of list || []) {
+        const name = parent ? `${parent}.${sym.name}` : sym.name;
+        flat.push({
+          name,
+          simpleName: sym.name,
+          kind: sym.kind,
+          detail: sym.detail || '',
+          range: sym.range,
+          selectionRange: sym.selectionRange || sym.range,
+        });
+        if (sym.children) walk(sym.children, name);
+      }
+    };
+    walk(res, null);
+    (this.symbolCache ??= new Map()).set(relPath, flat);
+    return flat;
+  }
+
+  // The innermost method/constructor whose range contains `line` (1-based).
+  async enclosingMember(relPath, line) {
+    const syms = await this.documentSymbols(relPath);
+    const zero = line - 1;
+    const containing = syms.filter((s) =>
+      (s.kind === 6 || s.kind === 9) && s.range.start.line <= zero && s.range.end.line >= zero);
+    if (containing.length === 0) return null;
+    // innermost = smallest span
+    return containing.sort((a, b) =>
+      (a.range.end.line - a.range.start.line) - (b.range.end.line - b.range.start.line))[0];
+  }
+
   async implementations(relPath, position) {
     const uri = this.open(relPath);
     if (!uri) return [];

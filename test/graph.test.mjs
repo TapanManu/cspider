@@ -1,6 +1,6 @@
 // Graph wiring (tasks 6.1, 6.2, 6.5, 6.5a) against a stub resolver — deterministic, no jdtls.
 // A real PR that updated all its call sites cannot exercise BROKEN, so it is proven here.
-import { buildGraph, scoreRisk } from '../src/graph/build.mjs';
+import { buildGraph, scoreRisk, expandBlastRadius } from '../src/graph/build.mjs';
 import { parseSymbols } from '../src/java/parse.mjs';
 import { diffSymbols, classifyNoise } from '../src/java/diff.mjs';
 import { provisionalSeverity } from '../src/review/order.mjs';
@@ -29,12 +29,26 @@ function analysisOf(beforeBody, afterBody, patch) {
 }
 
 // Stub: two call sites, one on a line the PR touched, one untouched.
-const stubResolver = (refs, { impls = [] } = {}) => ({
+const stubResolver = (refs, { impls = [], enclosing = null, refsByPath = null } = {}) => ({
   queries: 0,
-  async references() { return { refs, error: null }; },
+  async references(rel) {
+    if (refsByPath) return { refs: refsByPath[rel] ?? [], error: null };
+    return { refs, error: null };
+  },
   async implementations() { return impls; },
   async hover() { return null; },
   async definition() { return null; },
+  async documentSymbols() { return []; },
+  async enclosingMember(rel, line) {
+    if (typeof enclosing === 'function') return enclosing(rel, line);
+    return enclosing;
+  },
+});
+
+const member = (name, startLine = 0, endLine = 50) => ({
+  name, simpleName: name.split('.').pop(), kind: 6, detail: '(String)',
+  range: { start: { line: startLine, character: 2 }, end: { line: endLine, character: 2 } },
+  selectionRange: { start: { line: startLine, character: 2 }, end: { line: startLine, character: 8 } },
 });
 
 const CALLER_A = 'src/main/java/com/acme/CallerA.java';
@@ -201,6 +215,87 @@ await t('query budget exhaustion is UNKNOWN, not silent', async () => {
     { ...withLines(), queryBudget: 2 });
   assert.ok(g.truncations.some((x) => x.reason === 'queryBudget'), JSON.stringify(g.truncations));
   assert.ok([...g.nodes.values()].some((n) => /budget exhausted/.test(n.unknown?.reason ?? '')));
+});
+
+console.log('\ngraph — blast radius (6.3, 6.4)');
+
+const seeded = async (callerSites, stubOpts) => {
+  const a = analysisOf('public void f(String s) { g(1); }', 'public void f(String s) { g(2); }', null);
+  const g = await buildGraph(a, stubResolver(callerSites, stubOpts), withLines());
+  return { g, resolver: stubResolver(callerSites, stubOpts) };
+};
+
+await t('adds CONTEXT nodes for calling members, not for files', async () => {
+  const sites = [{ path: CALLER_A, line: 10 }, { path: CALLER_B, line: 20 }];
+  const opts = { enclosing: (rel, line) => member(`Caller.at${line}`, line - 2, line + 2) };
+  const { g, resolver } = await seeded(sites, opts);
+  const br = await expandBlastRadius(g, resolver, { depth: 1, maxNodes: 100, queryBudget: 100 });
+  const ctx = [...g.nodes.values()].filter((n) => n.origin === 'CONTEXT');
+  assert.equal(br.added, 2, JSON.stringify(br));
+  assert.equal(ctx.length, 2);
+  assert.ok(ctx.every((n) => n.kind === 'METHOD' && n.depth === 1));
+  assert.ok(ctx.every((n) => n.changeKind === 'UNCHANGED'));
+});
+
+await t('a call site outside any member does not invent a node', async () => {
+  const { g, resolver } = await seeded([{ path: CALLER_A, line: 10 }], { enclosing: () => null });
+  const br = await expandBlastRadius(g, resolver, { depth: 1 });
+  assert.equal(br.added, 0);
+  assert.equal([...g.nodes.values()].filter((n) => n.origin === 'CONTEXT').length, 0);
+});
+
+await t('node ceiling truncates AND is disclosed on the truncated node', async () => {
+  const sites = Array.from({ length: 30 }, (_, i) => ({ path: CALLER_A, line: (i + 1) * 10 }));
+  const opts = { enclosing: (rel, line) => member(`Caller.at${line}`, line - 2, line + 2) };
+  const { g, resolver } = await seeded(sites, opts);
+  const before = g.nodes.size;
+  const br = await expandBlastRadius(g, resolver, { depth: 1, maxNodes: before + 5, queryBudget: 500 });
+  assert.ok(br.truncated.some((x) => x.reason === 'maxNodes'), JSON.stringify(br.truncated));
+  assert.ok(g.nodes.size <= before + 6, `${g.nodes.size} vs ceiling ${before + 5}`);
+});
+
+await t('query budget truncates AND is disclosed', async () => {
+  const sites = Array.from({ length: 30 }, (_, i) => ({ path: CALLER_A, line: (i + 1) * 10 }));
+  const opts = { enclosing: (rel, line) => member(`Caller.at${line}`, line - 2, line + 2) };
+  const { g, resolver } = await seeded(sites, opts);
+  const br = await expandBlastRadius(g, resolver, { depth: 1, maxNodes: 1000, queryBudget: 4 });
+  assert.ok(br.truncated.some((x) => x.reason === 'queryBudget'), JSON.stringify(br.truncated));
+  assert.ok(br.budgetLeft <= 0);
+});
+
+await t('depth is a hard cap', async () => {
+  // Every file's caller is one level further out; without a cap this would never terminate.
+  const opts = {
+    enclosing: (rel, line) => member(`Caller.at${line}`, line - 2, line + 2),
+    refsByPath: { [P]: [{ path: CALLER_A, line: 10 }], [CALLER_A]: [{ path: CALLER_B, line: 20 }],
+                  [CALLER_B]: [{ path: CALLER_A, line: 30 }] },
+  };
+  const a = analysisOf('public void f(String s) { g(1); }', 'public void f(String s) { g(2); }', null);
+  const g = await buildGraph(a, stubResolver([], opts), withLines());
+  const br = await expandBlastRadius(g, stubResolver([], opts), { depth: 2, maxNodes: 1000, queryBudget: 500 });
+  assert.ok(br.reachedDepth <= 2, `reached ${br.reachedDepth}`);
+  const ctx = [...g.nodes.values()].filter((n) => n.origin === 'CONTEXT');
+  assert.ok(ctx.every((n) => n.depth <= 2), JSON.stringify(ctx.map((n) => n.depth)));
+});
+
+await t('a context node whose callers were not resolved is marked UNKNOWN', async () => {
+  const sites = [{ path: CALLER_A, line: 10 }];
+  const opts = { enclosing: (rel, line) => member(`Caller.at${line}`, line - 2, line + 2) };
+  const { g, resolver } = await seeded(sites, opts);
+  // depth 2 requested, but only enough budget for the depth-1 hop
+  const br = await expandBlastRadius(g, resolver, { depth: 2, maxNodes: 1000, queryBudget: 1 });
+  const ctx = [...g.nodes.values()].filter((n) => n.origin === 'CONTEXT');
+  assert.ok(ctx.length >= 1);
+  assert.ok(ctx.some((n) => n.unknown) || br.truncated.length > 0, JSON.stringify(br));
+});
+
+await t('expansion never reclassifies a changed node as context', async () => {
+  const sites = [{ path: P, line: 4 }];   // the call site is inside the changed file itself
+  const opts = { enclosing: () => member('Svc.f', 3, 5) };
+  const { g, resolver } = await seeded(sites, opts);
+  await expandBlastRadius(g, resolver, { depth: 1, maxNodes: 100, queryBudget: 100 });
+  assert.ok([...g.nodes.values()].filter((n) => n.origin === 'CHANGED').length >= 1);
+  assert.ok([...g.nodes.values()].every((n) => !(n.origin === 'CONTEXT' && n.changeKind !== 'UNCHANGED')));
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

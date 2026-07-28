@@ -15,8 +15,11 @@ and with `--resolve`: JDT LS resolution with the annotation-processor agent atta
 resolved callers, resolution health, **break analysis** (UPDATED / BROKEN / SAFE), indirect fan-in
 for overrides, and risk scoring.
 
-**Not built yet:** the plugin contract extraction (Phase B), blast-radius expansion, co-change and
-test-coverage edges, topological ordering, persistence, the UI, and comment posting.
+and with `--resolve`: **blast-radius expansion** to depth 2 with disclosed truncation, `CO_CHANGED`
+history correlation, `TEST_COVERS`, and topological review ordering.
+
+**Not built yet:** the plugin contract extraction (Phase B), persistence, the local server API,
+the UI, and comment posting.
 
 ## Setup
 
@@ -36,6 +39,10 @@ npm run review -- https://github.com/<owner>/<repo>/pull/<n> [more PR urls...]
   --show-noise      include suppressed low-signal units
   --resolve         resolve callers and run break analysis (starts jdtls)
   --max-symbols N   cap symbols resolved per PR (default 40)
+  --no-base         skip base-image resolution (removed members stay UNKNOWN)
+  --topo            order by callers-before-callees
+  --depth N         blast-radius depth (default 2, 0 disables)
+  --max-nodes N     node ceiling for expansion (default 400)
   --json <path>     write the full analysis
   --debug           stack traces on ingest failure
 ```
@@ -65,10 +72,11 @@ Give it every PR of one logical change and the cross-PR section will link them:
 ## Tests
 
 ```bash
-npm test    # 47 cases across three suites:
+npm test    # 61 cases across three suites:
             #   diff    — parsing, delta types, change kinds, rename/move, noise
             #   compat  — signature compatibility and BROKEN/UPDATED/SAFE verdicts
-            #   graph   — break analysis and indirect fan-in wired end to end (stub resolver)
+            #   graph   — break analysis, indirect fan-in, UNKNOWN handling, and
+            #             blast-radius bounds, all against a stub resolver
 ```
 
 A real PR that updated all of its call sites cannot exercise `BROKEN`, so the verdict logic is
@@ -97,7 +105,7 @@ behind the out-of-process plugin contract in Phase B, which is what makes Go and
 - Non-Java changed files are listed but not analyzed.
 - Lombok-generated members are not yet synthesised as nodes (F5b) — the agent makes them *resolve*,
   but `documentSymbol` still does not enumerate them.
-- Resolution is depth-1 only; blast-radius expansion is not implemented.
-- `REMOVED` members are not resolved: there is no head-side position to query, so their callers
-  need base-image resolution (not yet wired). Their break verdict is therefore unknown, not SAFE.
+- Blast radius is capped at depth 2 with a node ceiling and a query budget. Whenever a bound
+  bites it is reported — the graph is never quietly presented as complete.
 - Nothing is persisted between runs except the payload/clone caches.
+- The design lives in `openspec/changes/pr-semantic-graph-reader/`; `openspec validate` covers it.

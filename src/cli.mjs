@@ -14,7 +14,7 @@ import { parseSymbols, parseImports } from './java/parse.mjs';
 import { diffSymbols, classifyNoise } from './java/diff.mjs';
 import { provisionalSeverity, orderUnits, bySeverity, correlateCrossRepo } from './review/order.mjs';
 import { JavaResolver, jdtlsAvailable } from './java/resolve.mjs';
-import { buildGraph, scoreRisk, coChangedEdges, topologicalOrder } from './graph/build.mjs';
+import { buildGraph, scoreRisk, coChangedEdges, topologicalOrder, expandBlastRadius } from './graph/build.mjs';
 import { changedLines, filesWithoutPatch } from './ingest/changedLines.mjs';
 import { ensureWorktree } from './ingest/pr.mjs';
 
@@ -37,6 +37,8 @@ options:
   --resolve         resolve callers and run break analysis (starts jdtls; slower)
   --no-base         skip base-image resolution (removed members stay UNKNOWN, faster)
   --topo            order by callers-before-callees instead of file/containment
+  --depth N         blast-radius depth (default 2, 0 disables expansion)
+  --max-nodes N     total node ceiling for expansion (default 400)
   --max-symbols N   cap symbols resolved per PR (default 40)
   --json <path>     write the full analysis as JSON
 `);
@@ -205,6 +207,18 @@ if (has('resolve')) {
         queryBudget: Number(flag('query-budget', 400)),
       });
       for (const n of a.graph.nodes.values()) if (n.callers) n.risk = scoreRisk(n);
+
+      // Task 6.3: expand the blast radius after break analysis, so the seeds already have callers.
+      const depth = Number(flag('depth', 2));
+      if (depth > 0) {
+        process.stderr.write(C.dim(` expanding d${depth}`));
+        await expandBlastRadius(a.graph, resolver, {
+          depth,
+          maxNodes: Number(flag('max-nodes', 400)),
+          queryBudget: Number(flag('expand-budget', 300)),
+          buildRootPrefix: prefix,
+        });
+      }
       a.coChanged = coChangedEdges(a.clone, a.files.map((f) => f.filename));
       a.topo = topologicalOrder(a.graph.nodes, a.graph.edges);
       a.resolveReady = ready;
@@ -325,6 +339,25 @@ for (const a of analyses) {
         console.log(C.yellow(`   ⚠ query budget exhausted at ${shortFqn(t2.fqn)}`));
       }
     }
+  }
+  const br = a.graph?.blastRadius;
+  if (br) {
+    const ctx = [...a.graph.nodes.values()].filter((n) => n.origin === 'CONTEXT');
+    console.log(C.dim(`\n   blast radius: ${ctx.length} context node(s) at depth ≤ ${br.reachedDepth}` +
+      ` of ${br.depth} requested  ·  ${a.graph.edges.filter((e) => e.type === 'CALLS').length} CALLS edge(s)`));
+    if (br.truncated.length) {
+      // Never let a bound pass silently: "nothing else is affected" is the worst possible lie.
+      const byReason = new Map();
+      for (const t2 of br.truncated) byReason.set(t2.reason, (byReason.get(t2.reason) ?? 0) + 1);
+      console.log(C.yellow(`   ⚠ expansion truncated — the graph is INCOMPLETE beyond these points:`));
+      for (const [r, n2] of byReason) console.log(C.yellow(`     ${n2}× ${r === 'maxNodes' ? 'node ceiling reached' : 'query budget exhausted'}`));
+      for (const t2 of br.truncated.slice(0, 4)) {
+        console.log(C.dim(`       at ${shortFqn(t2.fqn)} (depth ${t2.depth})`));
+      }
+    }
+    const byDepth = new Map();
+    for (const n2 of ctx) byDepth.set(n2.depth, (byDepth.get(n2.depth) ?? 0) + 1);
+    for (const [d2, n2] of [...byDepth].sort()) console.log(C.dim(`     depth ${d2}: ${n2} node(s)`));
   }
   if (a.coChanged?.length) {
     console.log(C.dim(`\n   ${a.coChanged.length} CO_CHANGED pair(s)  [correlation from git history, NOT resolution]`));

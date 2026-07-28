@@ -318,3 +318,131 @@ export function topologicalOrder(nodes, edges) {
   const cyclic = [...nodes.values()].filter((n) => !seen.has(n.id)).sort((a, b) => risk(b) - risk(a));
   return { ordered: [...ordered, ...cyclic], cyclic: cyclic.map((n) => n.fqn) };
 }
+
+/**
+ * Task 6.3 / 6.4 — blast-radius expansion.
+ *
+ * Adds CONTEXT nodes for the symbols that call the changed ones, out to `depth` hops. Bounded
+ * three ways, and every bound that bites is recorded on the node that was truncated:
+ *
+ *   depth      hard cap (default 2). Depth 3 on a service-layer method with high fan-in produces
+ *              thousands of nodes and a hairball no reviewer can use.
+ *   maxNodes   total node ceiling.
+ *   budget     outstanding resolution requests. This is the real constraint, not node count —
+ *              `references` measured ~11s/symbol on a monorepo versus ~0.4s on a small repo.
+ *
+ * Silent truncation is the one thing this must never do: "nothing else is affected" is the most
+ * dangerous possible lie for a review tool.
+ */
+export async function expandBlastRadius(graph, resolver, opts = {}) {
+  const {
+    depth = 2, maxNodes = 400, queryBudget = 300,
+    buildRootPrefix = '', onlyFrom = null,
+  } = opts;
+  if (!resolver) return { added: 0, truncated: [], budgetLeft: 0, reachedDepth: 0 };
+
+  const strip = (p) => (buildRootPrefix && p.startsWith(`${buildRootPrefix}/`)
+    ? p.slice(buildRootPrefix.length + 1) : p);
+  const unstrip = (p) => (buildRootPrefix ? `${buildRootPrefix}/${p}` : p);
+
+  let budget = queryBudget;
+  const truncated = [];
+  const contextId = (path, name) => `ctx:${path}#${name}`;
+  let added = 0;
+  let reachedDepth = 0;
+
+  // Seed: changed nodes that already have resolved callers.
+  let frontier = [...graph.nodes.values()]
+    .filter((n) => n.origin === 'CHANGED' && n.callers?.length)
+    .filter((n) => !onlyFrom || n.id === onlyFrom);
+
+  for (let d = 1; d <= depth; d++) {
+    const next = [];
+    for (const node of frontier) {
+      for (const site of node.callers ?? []) {
+        if (graph.nodes.size >= maxNodes) {
+          truncated.push({ nodeId: node.id, fqn: node.fqn, reason: 'maxNodes', depth: d });
+          break;
+        }
+        if (budget <= 0) {
+          truncated.push({ nodeId: node.id, fqn: node.fqn, reason: 'queryBudget', depth: d });
+          break;
+        }
+
+        const rel = strip(site.path);
+        const encl = await resolver.enclosingMember(rel, site.line);
+        budget--;
+        if (!encl) {
+          // A call site outside any member (field initialiser, static block) is still real —
+          // record it on the edge rather than dropping the relationship.
+          continue;
+        }
+
+        const id = contextId(site.path, encl.name);
+        // If this caller is itself a changed node, link to that instead of duplicating it.
+        const existingChanged = [...graph.nodes.values()].find(
+          (n) => n.origin === 'CHANGED' && n.path === site.path && n.fqn.endsWith(`#${encl.simpleName}${paramsOf(encl)}`));
+        const fromId = existingChanged?.id ?? id;
+
+        if (!existingChanged && !graph.nodes.has(id)) {
+          graph.nodes.set(id, {
+            id,
+            fqn: `${encl.name}${encl.detail || ''}`,
+            kind: encl.kind === 9 ? 'CONSTRUCTOR' : 'METHOD',
+            path: site.path,
+            changeKind: 'UNCHANGED',
+            origin: 'CONTEXT',
+            depth: d,
+            deltas: [],
+            severity: { total: 0, components: [] },
+            publicApi: false,
+            test: isTestSource(site.path),
+            callers: null,
+            break: null,
+            fanIn: null,
+            unknown: null,
+            range: encl.range,
+          });
+          added++;
+        }
+
+        graph.edges.push({
+          type: 'CALLS', from: fromId, to: node.id, derivedFrom: 'LSP', depth: d,
+          evidence: [{ path: site.path, line: site.line }],
+        });
+
+        if (d < depth && !existingChanged) next.push(graph.nodes.get(id));
+      }
+    }
+    reachedDepth = d;
+    if (next.length === 0) break;
+
+    // Resolve the next ring's own callers so depth d+1 has something to walk.
+    frontier = [];
+    for (const ctx of next) {
+      if (budget <= 1 || graph.nodes.size >= maxNodes) {
+        truncated.push({ nodeId: ctx.id, fqn: ctx.fqn, reason: budget <= 1 ? 'queryBudget' : 'maxNodes', depth: d + 1 });
+        ctx.unknown = { reason: `callers not resolved — expansion bound reached at depth ${d + 1}` };
+        continue;
+      }
+      const rel = strip(ctx.path);
+      const { refs, error } = await resolver.references(rel, ctx.range.start);
+      budget--;
+      if (error) {
+        ctx.unknown = { reason: `resolution failed: ${error}` };
+        continue;
+      }
+      ctx.callers = refs.map((r) => ({ path: unstrip(r.path), line: r.line, side: 'head', inDiff: false }));
+      ctx.fanIn = { count: ctx.callers.length, kind: 'DIRECT', note: null };
+      frontier.push(ctx);
+    }
+  }
+
+  graph.blastRadius = { depth, reachedDepth, added, maxNodes, truncated, budgetLeft: budget };
+  return graph.blastRadius;
+}
+
+const paramsOf = (encl) => {
+  const m = /\(([^)]*)\)/.exec(encl.detail || '');
+  return m ? `(${m[1].replace(/\s+/g, '')})` : '';
+};

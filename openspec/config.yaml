@@ -1,0 +1,20 @@
+schema: spec-driven
+
+context: |
+  cspider — a PR semantic change reader. Presents a pull request as change units and typed
+  deltas rather than text hunks, and links producers to consumers across a multi-repo change set.
+
+  Stack: Node.js (ESM, no build step), tree-sitter for Java parsing, Eclipse JDT LS over stdio
+  for resolution, better-sqlite3 for storage, React planned for the UI.
+
+  Hard constraints that the design keeps returning to:
+    - Graph edges come from a language server, never from heuristics or an LLM. A graph that is
+      90% right is worse than none, because the reviewer cannot tell which 10% is fabricated.
+    - Every edge carries clickable file:line evidence. An edge without evidence is a bug.
+    - Nothing that was not analysed may render as SAFE or as silence. It renders as UNKNOWN with
+      a stated reason. Absent and failed must never look the same.
+    - All language-specific work sits behind an out-of-process plugin contract, so Go and Python
+      are additive.
+
+  Measurements that corrected earlier assumptions live in FINDINGS.md and are cited by finding
+  number (F1–F13, A1–A4) throughout design.md.
