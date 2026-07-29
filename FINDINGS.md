@@ -881,3 +881,42 @@ key is worth reporting even with its consumers unknown.
 
 The default value is captured deliberately. A key that defaulted to `false` and a key with no default
 carry different risk when removed.
+
+## Field resolution measured (2.1–2.6, 7.4)
+
+Widening resolution to fields turned all seven of PR 244's field units from UNKNOWN into resolved
+usage lists. 22 usage sites, every one attributed to an enclosing member, no truncation, health still
+clean. Cost: the run went from 89 to 89 queries with `budgetLeft: 29` — fields are one `references`
+query each, not two, because a field cannot be overridden and needs no `implementations` call.
+
+That confirms the earlier correction: `references` costs ~0.4s/symbol on this repo against ~11s on a
+monorepo, so seven fields are seconds, not minutes. The per-kind budget split in 2.4 therefore exists
+for the monorepo case. Sizing it from this repo's numbers would starve exactly the repositories where
+the budget actually binds.
+
+**A1 holds for fields, and it matters more than for methods.** Three of the four non-test field
+changes are removals, and all three resolved against the *base* image with `side: base` —
+`reuseSession` at `SessionService.java:208` and `:913`, `resetCore` at `:215`. A head-side query
+would have returned nothing for all three, which is the "0 usages" the previous behaviour reported.
+
+**The most useful single finding the resolution produced** was not a removal. `VclusterProperties.defaultVersion`
+changed only its initializer and has **9 usages, of which 6 lie outside this PR's diff** —
+`VclusterCapabilityService.capabilities()`, `VclusterProperties.resolveVersionOrDefault`, and others
+the author never touched. Every one still compiles and every one now reads a different default. That
+is exactly the case `VALUE_CHANGED` was designed for in D3, and it is now visible with evidence
+instead of being hypothesised from the delta type.
+
+Two disclosures were needed to keep the partial state honest:
+
+- `usageVerdicts: { available: false }` on every resolved variable. Direction and compatibility are
+  group 4; a list of nine usages with no verdicts must not be able to read as nine safe usages. The
+  UI states it above the list, not as a footnote.
+- A v5 migration persisting `usages` and `usage_verdicts`. Without it a cache-served run would show a
+  field with no usages while a fresh run showed nine — the cache disagreeing with a fresh analysis,
+  which is what F15 was about. Verified: the cache-served run reports the identical 7/7 and 22 usages.
+  The availability note persists too, because restoring the usages without it would turn
+  "verdicts unknown" into "apparently fine".
+
+Also found: `enum_constant` is absent from the parser's node map, so enum constants are not change
+units at all and ENUM_CONSTANT resolution cannot be reached. Recorded as task 2.1a rather than
+counting 2.1 as fully done.

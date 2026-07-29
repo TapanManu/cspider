@@ -317,9 +317,17 @@ export function createApiServer({ cacheDir, dbPath, gh }) {
         };
       });
 
+      // A variable's usages, excerpted from the USING file — the declaring file shows nothing about
+      // how the value is consumed. Same rule as call sites.
+      const usages = (node.usages ?? []).map((x) => ({
+        ...x,
+        excerpt: callSiteExcerpt(clone, x.side === 'base' ? pr.merge_base : pr.head_sha, x.path, x.line, 2),
+      }));
+
       return {
         node: {
           ...node,
+          usages,
           reviewed: !!reviewed.state.get(node.id)?.reviewed,
           stale: !!reviewed.state.get(node.id)?.stale,
         },

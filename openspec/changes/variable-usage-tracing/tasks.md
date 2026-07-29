@@ -6,12 +6,13 @@
 
 ## 2. Field resolution
 
-- [ ] 2.1 Widen the resolution target filter to include FIELD and ENUM_CONSTANT, keeping the existing severity ordering
-- [ ] 2.2 Resolve field references position-anchored against the head image
-- [ ] 2.3 Resolve REMOVED fields against the base image; without one, UNKNOWN and never SAFE or zero (D4, A1)
-- [ ] 2.4 Give fields their own share of the symbol budget so adding them cannot silently evict methods, and report per-kind omissions
-- [ ] 2.5 Attribute each reference to its enclosing member, reusing `enclosingMember`; references outside any member become usage sites without a member rather than being dropped (D6)
-- [ ] 2.6 Test against a fixture repository: a read-only field, a written field, a removed field with surviving readers, and a field used in a static initializer
+- [x] 2.1 Widen the resolution target filter to include FIELD, keeping the existing severity ordering
+- [ ] 2.1a Extract enum constants as change units — `enum_constant` is absent from the parser's node map, so ENUM_CONSTANT resolution cannot be reached until the parser emits them
+- [x] 2.2 Resolve field references position-anchored against the head image
+- [x] 2.3 Resolve REMOVED fields against the base image; without one, UNKNOWN and never SAFE or zero (D4, A1)
+- [x] 2.4 Give fields their own share of the symbol budget so adding them cannot silently evict methods, and report per-kind omissions
+- [x] 2.5 Attribute each reference to its enclosing member, reusing `enclosingMember`; references outside any member become usage sites without a member rather than being dropped (D6)
+- [x] 2.6 Test against a fixture repository: a read-only field, a written field, a removed field with surviving readers, and a field used in a static initializer
 
 ## 3. Read/write classification (Java, in `src/java/`)
 
@@ -57,5 +58,5 @@
 - [x] 7.1 Validate against `sedai-simulation-server#244`: all 7 field units resolve or state why not, and none reports zero usages without having been looked up
 - [ ] 7.2 Confirm `VclusterProperties.defaultVersion` reports VALUE_CHANGED with both initializer values, not SAFE
 - [ ] 7.3 Confirm the three REMOVED fields either list their base-image readers or state UNKNOWN with the missing-base reason
-- [ ] 7.4 Measure the added resolution cost per field and record it in FINDINGS, so the budget split in 2.4 rests on a number
+- [x] 7.4 Measure the added resolution cost per field and record it in FINDINGS, so the budget split in 2.4 rests on a number
 - [ ] 7.5 Confirm a field whose accessors are Lombok-generated declares partial reach rather than presenting a short list as complete (F5b)

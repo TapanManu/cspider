@@ -145,6 +145,16 @@ const MIGRATIONS = [
   ALTER TABLE drafts ADD COLUMN group_id TEXT;
   CREATE INDEX IF NOT EXISTS drafts_by_group ON drafts (group_id);
   `,
+  // v5 — resolved variable usages, and the statement that their verdicts are not yet computed.
+  //
+  // Without persisting these, a cache-served run would show a field with no usages while a fresh run
+  // showed twelve — the cache quietly disagreeing with a fresh analysis, which is exactly what F15
+  // was about. The verdict-availability note has to persist for the same reason: restoring the
+  // usages without it would turn "12 usages, verdicts unknown" into "12 usages, apparently fine".
+  `
+  ALTER TABLE nodes ADD COLUMN usages TEXT;
+  ALTER TABLE nodes ADD COLUMN usage_verdicts TEXT;
+  `,
 ];
 
 // Derived, never declared. A hand-maintained constant beside this array is a second source of

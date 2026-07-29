@@ -309,43 +309,111 @@ console.log('\ngraph — unresolved kinds declare themselves UNKNOWN (A2)');
 
 const withField = (before, after) => analysisOf(before, after, null);
 
-await t('a changed field is UNKNOWN with a reason, not zero usages', async () => {
-  const a = withField(
-    'private boolean flag = false;\n  public void f(String s) { g(); }',
-    'private boolean flag = true;\n  public void f(String s) { g(); }',
-  );
-  const g = await buildGraph(a, stubResolver([]), withLines());
-  const field = [...g.nodes.values()].find((n) => n.kind === 'FIELD');
+const FLAG_BEFORE = 'private boolean flag = false;\n  public void f(String s) { g(); }';
+const FLAG_AFTER = 'private boolean flag = true;\n  public void f(String s) { g(1); }';
+const fieldOf = (g) => [...g.nodes.values()].find((n) => n.kind === 'FIELD');
+
+await t('a field whose reference query FAILS is UNKNOWN, not empty (A2/F12)', async () => {
+  // With no resolver at all the whole graph declares `resolved: false`, so the disclosure lives at
+  // graph level. The per-field case that matters is a query that ran and errored: a failed query is
+  // not an empty result.
+  const a = withField(FLAG_BEFORE, FLAG_AFTER);
+  const failing = {
+    ...stubResolver([]),
+    async references() { return { refs: [], error: 'index not ready' }; },
+  };
+  const g = await buildGraph(a, failing, withLines());
+  const field = fieldOf(g);
   assert.ok(field, 'the field is a change unit');
   assert.ok(field.unknown, 'a field must not be left with unknown: null');
-  assert.match(field.unknown.reason, /not resolved|unknown, not absent/);
+  assert.match(field.unknown.reason, /index not ready/);
   assert.equal(field.fanIn, null, 'and it must not claim a resolved fan-in');
+  assert.equal(field.usages, undefined, 'nor a usage list it never obtained');
 });
 
-await t('the reason distinguishes never-looked from looked-and-found-nothing', async () => {
-  // Both the field AND the method must change, or there is no resolved member to contrast against.
-  const a = withField(
-    'private boolean flag = false;\n  public void f(String s) { g(); }',
-    'private boolean flag = true;\n  public void f(String s) { g(1); }',
-  );
-  const g = await buildGraph(a, stubResolver([]), withLines());
-  const field = [...g.nodes.values()].find((n) => n.kind === 'FIELD');
-  const method = [...g.nodes.values()].find((n) => n.kind === 'METHOD');
-  // The method WAS resolved and genuinely has no callers: no unknown marker.
-  assert.equal(method.unknown, null, 'a resolved member with no callers is not UNKNOWN');
-  assert.ok(field.unknown, 'an unresolved field is UNKNOWN');
-  assert.notEqual(field.unknown.reason, method.unknown?.reason);
+await t('a field beyond its own cap is UNKNOWN, naming the cap', async () => {
+  const a = withField(FLAG_BEFORE, FLAG_AFTER);
+  const g = await buildGraph(a, stubResolver([]), { ...withLines(), maxVariables: 0 });
+  assert.match(fieldOf(g).unknown.reason, /max-variables/);
 });
 
-await t('a removed field is UNKNOWN rather than reported clean', async () => {
-  const a = withField(
-    'private boolean gone = false;\n  public void f(String s) { g(); }',
-    'public void f(String s) { g(); }',
-  );
+await t('a resolved field with no usages is a finding, not an UNKNOWN', async () => {
+  // We looked and found none. That is the one case where "zero usages" may be stated.
+  const a = withField(FLAG_BEFORE, FLAG_AFTER);
   const g = await buildGraph(a, stubResolver([]), withLines());
-  const field = [...g.nodes.values()].find((n) => n.kind === 'FIELD');
+  const field = fieldOf(g);
+  assert.equal(field.unknown, null, 'having looked, it is no longer unknown');
+  assert.deepEqual(field.usages, []);
+  assert.equal(field.fanIn.count, 0);
+});
+
+await t('a resolved field states that verdicts are still unavailable', async () => {
+  // Group 4 owns direction and compatibility. Until then a usage list must not read as a clean one.
+  const a = withField(FLAG_BEFORE, FLAG_AFTER);
+  const g = await buildGraph(a, stubResolver([{ path: CALLER_A, line: 10 }]), withLines());
+  const field = fieldOf(g);
+  assert.equal(field.usages.length, 1);
+  assert.equal(field.usageVerdicts.available, false);
+  assert.match(field.usageVerdicts.reason, /not implemented yet/);
+});
+
+await t('each usage carries its file, line, in-diff flag and enclosing member', async () => {
+  const a = withField(FLAG_BEFORE, FLAG_AFTER);
+  const g = await buildGraph(a,
+    stubResolver([{ path: CALLER_A, line: 10 }], { enclosing: member('CallerA.reads', 5, 20) }),
+    withLines(touchedMap([[CALLER_A, [10]]])));
+  const [usage] = fieldOf(g).usages;
+  assert.equal(usage.path, CALLER_A);
+  assert.equal(usage.line, 10);
+  assert.equal(usage.inDiff, true);
+  assert.equal(usage.member, 'CallerA.reads');
+  assert.equal(usage.outsideMember, false);
+});
+
+await t('a usage outside any member is kept and labelled, not dropped', async () => {
+  // A read in a field initializer or a static block has no enclosing method. Dropping it would
+  // understate the reach; silently attributing it to something would be worse.
+  const a = withField(FLAG_BEFORE, FLAG_AFTER);
+  const g = await buildGraph(a,
+    stubResolver([{ path: CALLER_A, line: 3 }], { enclosing: null }),
+    withLines());
+  const [usage] = fieldOf(g).usages;
+  assert.equal(usage.outsideMember, true);
+  assert.equal(usage.member, null);
+  assert.equal(fieldOf(g).fanIn.count, 1, 'and it still counts toward reach');
+});
+
+await t('a REMOVED field resolves against the base image', async () => {
+  const a = withField('private boolean gone = false;\n  public void f(String s) { g(); }',
+    'public void f(String s) { g(); }');
+  const g = await buildGraph(a, {
+    head: stubResolver([]),
+    base: stubResolver([{ path: CALLER_A, line: 9 }]),
+  }, withLines());
+  const field = fieldOf(g);
   assert.equal(field.changeKind, 'REMOVED');
+  assert.equal(field.usages.length, 1, 'its readers come from base, where it still existed');
+  assert.equal(field.usages[0].side, 'base');
+});
+
+await t('a REMOVED field without a base image is UNKNOWN, never zero (A1)', async () => {
+  const a = withField('private boolean gone = false;\n  public void f(String s) { g(); }',
+    'public void f(String s) { g(); }');
+  const g = await buildGraph(a, { head: stubResolver([]), base: null }, withLines());
+  const field = fieldOf(g);
   assert.ok(field.unknown, 'a REMOVED field claiming zero readers is the failure this prevents');
+  assert.match(field.unknown.reason, /base-image/);
+  assert.equal(field.usages, undefined);
+});
+
+await t('resolving fields does not reduce the method cap', async () => {
+  // maxSymbols is a promise about members. If fields drew from it, asking for 40 symbols would
+  // quietly yield 33 members plus 7 fields.
+  const a = withField(FLAG_BEFORE, FLAG_AFTER);
+  const g = await buildGraph(a, stubResolver([]), { ...withLines(), maxSymbols: 1 });
+  const method = [...g.nodes.values()].find((n) => n.kind === 'METHOD');
+  assert.equal(method.unknown, null, 'the one member allowed was still resolved');
+  assert.ok(fieldOf(g).usages, 'and the field was resolved from its own budget');
 });
 
 await t('a type change unit is UNKNOWN too, not only fields', async () => {

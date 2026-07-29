@@ -382,5 +382,42 @@ t('humanBytes is readable', () => {
   assert.match(humanBytes(5 * 1024 ** 3), /GB$/);
 });
 
+// A cache-served run must not quietly disagree with a fresh one (F15). Variable usages are the
+// newest thing that could diverge: restore them without the verdict-availability note and
+// "12 usages, verdicts unknown" silently becomes "12 usages, apparently fine".
+t('variable usages and their verdict-availability survive the cache', () => {
+  const db = fresh();
+  const units = unitsOf('void f() { g(1); }', 'void f() { g(2); }');
+  const usages = [
+    { path: 'src/main/java/com/acme/Reader.java', line: 42, side: 'head', inDiff: false, member: 'Reader.read()', outsideMember: false },
+    { path: 'src/main/java/com/acme/Reader.java', line: 9, side: 'base', inDiff: true, member: null, outsideMember: true },
+  ];
+  saveAnalysis(db, {
+    pr: { nwo: 'acme/svc', number: 1, repo: 'svc' },
+    meta: { headRefOid: 'head1', title: 'T', url: 'u' },
+    mergeBase: 'base1', buildRoots: { primary: '.' }, units,
+    graph: {
+      nodes: new Map(units.map((u) => [u.id, {
+        id: u.id, fqn: u.fqn, kind: u.kind, path: u.path, origin: 'CHANGED',
+        changeKind: u.changeKind, risk: null, fanIn: { count: 2, kind: 'DIRECT' },
+        break: null, unknown: null, usages,
+        usageVerdicts: { available: false, reason: 'not implemented yet' },
+      }])),
+      edges: [],
+    },
+  });
+
+  const n = [...loadGraph(db, PR, 'head1').nodes.values()][0];
+  assert.equal(n.usages.length, 2, 'a cached field must not come back with no usages');
+  assert.equal(n.usages[0].member, 'Reader.read()');
+  assert.equal(n.usages[0].inDiff, false);
+  // The outside-any-member distinction has to survive too, or a static-initializer read gets
+  // silently attributed to nothing on reload.
+  assert.equal(n.usages[1].outsideMember, true);
+  assert.equal(n.usages[1].member, null);
+  assert.equal(n.usages[1].side, 'base');
+  assert.equal(n.usageVerdicts.available, false, 'restoring usages without this would imply they are safe');
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

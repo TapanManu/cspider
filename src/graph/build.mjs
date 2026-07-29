@@ -40,6 +40,7 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
     maxSymbols = Infinity, buildRootPrefix = '',
     touchedHead = new Map(), touchedBase = new Map(),
     touchedSource = 'none', depth = 2, queryBudget = 400,
+    maxVariables = maxSymbols,
   } = opts;
 
   const nodes = new Map();
@@ -94,6 +95,30 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
   if (members.length > selected.length) {
     truncations.push({ reason: 'maxSymbols', omitted: members.length - selected.length });
   }
+
+  // Task 2.1/2.4 — variables get their OWN cap and their own share of the query budget. Folding them
+  // into `maxSymbols` would mean adding field resolution silently resolved fewer methods, and a
+  // reviewer who asked for 40 symbols would quietly get 33 of them plus 7 fields.
+  const variables = analysis.units
+    .filter((u) => u.noise.length === 0)
+    .filter((u) => u.kind === 'FIELD')
+    .sort((a, b) => b.severity.total - a.severity.total);
+
+  const selectedVars = variables.slice(0, maxVariables);
+  if (variables.length > selectedVars.length) {
+    truncations.push({ reason: 'maxVariables', omitted: variables.length - selectedVars.length });
+  }
+  for (const u of variables.slice(maxVariables)) {
+    nodes.get(u.id).unknown = { reason: 'not resolved — beyond the --max-variables cap' };
+  }
+
+  // Reserve a slice of the shared query budget so neither kind can starve the other in silence.
+  // A field costs one `references` query; a member costs two, because it also asks for
+  // implementations. Fields therefore need a smaller slice for the same coverage.
+  const varBudget = selectedVars.length
+    ? Math.max(selectedVars.length, Math.floor(queryBudget * 0.25))
+    : 0;
+  budget -= varBudget;
   // A2: symbols we chose not to resolve are UNKNOWN, not SAFE.
   for (const u of members.slice(maxSymbols)) {
     nodes.get(u.id).unknown = { reason: `not resolved — beyond the --max-symbols cap` };
@@ -107,7 +132,9 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
   // Measured on sedai-simulation-server#244: 7 of 44 units are fields, 3 of them REMOVED, all seven
   // previously reporting zero usages with no reason given. A2 was not weakly applied here; the loop
   // that applies it was unreachable.
-  const resolvedIds = new Set(selected.map((u) => u.id));
+  // Everything we are ABOUT to resolve, members and variables alike. Marking a symbol unresolved
+  // here and then resolving it below would report a stale UNKNOWN alongside real usages.
+  const resolvedIds = new Set([...selected, ...selectedVars].map((u) => u.id));
   for (const u of analysis.units) {
     const node = nodes.get(u.id);
     if (!node || node.unknown || resolvedIds.has(u.id)) continue;
@@ -218,6 +245,84 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
       addCallEdge(u.id, c, { verdict: r.verdict });
     }
     node.break = { verdicts, detail, contractChange: describeContract(u, removed) };
+  }
+
+  // ------------------------------------------------------------------ variables (tasks 2.2–2.5)
+  //
+  // A field's usages are resolved exactly as a member's callers are, with three differences:
+  //   - no `implementations` query: a field cannot be overridden, so it costs one query, not two
+  //   - each usage is attributed to its enclosing member, and a usage in a field initializer or a
+  //     static block legitimately has none rather than being dropped (2.5)
+  //   - no verdicts. Compatibility for variables is group 4; until it exists this node says so,
+  //     because a usage list with no verdicts must not be able to read as a clean one.
+  let vBudget = varBudget;
+  for (const u of selectedVars) {
+    const node = nodes.get(u.id);
+
+    // A1, restated for fields: a REMOVED field has no head-side position, so its readers can only
+    // come from the base image. Without one they are UNKNOWN — never zero, never safe (2.3).
+    const removed = u.changeKind === 'REMOVED';
+    const resolver = removed ? base : head;
+    if (!resolver) {
+      node.unknown = {
+        reason: removed
+          ? 'removed field — base-image resolution unavailable, so its readers and writers are unknown'
+          : 'no resolver available',
+      };
+      continue;
+    }
+    if (vBudget <= 0) {
+      node.unknown = { reason: 'resolution query budget for variables exhausted' };
+      truncations.push({ reason: 'variableQueryBudget', fqn: u.fqn });
+      continue;
+    }
+
+    const rel = strip(u.path);
+    const pos = u.symbol.selectionRange.start;
+    const { refs, error } = await resolver.references(rel, pos);
+    vBudget--;
+    if (error) {
+      // A2/F12: a failed query is not an empty result.
+      node.unknown = { reason: `resolution failed: ${error}` };
+      unresolved.push({ fqn: u.fqn, reason: error });
+      continue;
+    }
+
+    const sideMap = removed ? touchedBase : touchedHead;
+    const side = removed ? 'base' : 'head';
+    const sites = refs.filter((r) => !(strip(r.path) === rel && r.line === pos.line + 1));
+
+    const usages = [];
+    const seenFiles = new Set();
+    for (const r of sites) {
+      // documentSymbol is cached per file, so this costs one query per distinct file, not per usage.
+      if (!seenFiles.has(r.path)) { seenFiles.add(r.path); vBudget--; }
+      let member = null;
+      try {
+        member = await resolver.enclosingMember(r.path, r.line);
+      } catch { member = null; }
+      const full = unstrip(r.path);
+      usages.push({
+        path: full,
+        line: r.line,
+        side,
+        inDiff: sideMap.get(full)?.has(r.line) ?? false,
+        member: member?.name ?? null,
+        // A usage outside any method or constructor is a real usage with no enclosing member, and
+        // has to say which of the two it is rather than being silently dropped (2.5).
+        outsideMember: !member,
+      });
+    }
+
+    node.usages = usages;
+    node.fanIn = { count: usages.length, kind: 'DIRECT', note: null };
+    node.testCovered = usages.some((c) => isTestSource(c.path));
+    // Group 4 owns READS_FIELD/WRITES_FIELD and the verdict vocabulary. Saying so here is what stops
+    // "12 usages, no verdicts" from being mistaken for "12 usages, all fine".
+    node.usageVerdicts = {
+      available: false,
+      reason: 'read/write direction and compatibility verdicts for variables are not implemented yet',
+    };
   }
 
   // A2: ambiguous overload sets that the differ deliberately left unpaired.

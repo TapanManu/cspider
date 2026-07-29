@@ -351,6 +351,22 @@ pre.diff .ln { color: var(--faint); display: inline-block; width: 34px; text-ali
 .comp { display: flex; justify-content: space-between; font-size: 11.5px; padding: 1px 0; }
 .comp span:last-child { color: var(--faint); }
 
+/* ------------------------------------------------- variable usages (2.2–2.5) */
+.useFile {
+  display: flex; gap: 7px; align-items: baseline; margin: 9px 0 3px;
+  font-size: 11px; color: var(--dim);
+}
+.useFile .mono { font-family: ui-monospace, monospace; color: var(--fg); }
+.useSite { margin: 4px 0; }
+.useSite .hd { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+/* A partial result announces itself. It is not a footnote to the list below it. */
+.partialBox {
+  border: 1px solid var(--unknown); border-left-width: 3px; border-radius: 5px;
+  padding: 7px 9px; margin: 6px 0; background: rgba(224,160,43,.08); font-size: 11.5px;
+}
+.partialBox b { color: var(--unknown); }
+.partialBox .sm { display: block; color: var(--faint); font-size: 10.5px; margin-top: 2px; }
+
 /* An unresolved symbol's impact pane must not read as an empty one (task 1.2). */
 .unknownOverlay {
   position: absolute; top: 10px; left: 10px; right: 10px; z-index: 2;

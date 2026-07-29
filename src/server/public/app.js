@@ -658,6 +658,7 @@ async function renderDetail(id) {
   }
 
   if (u?.binding) out.push(bindingHtml(u.binding));
+  if (n.usages) out.push(usagesHtml(n));
 
   const v = d.callerSummary;
   if (v && (v.BROKEN || v.UPDATED || v.SAFE)) {
@@ -756,6 +757,57 @@ async function renderDetail(id) {
   wireDiffLines(el);
   wireThreads(el);
   if (u) wireShared(el, u.id);
+}
+
+/**
+ * A variable's resolved usages (tasks 2.2–2.5, and a first cut of 6.1).
+ *
+ * Grouped by file, each site excerpted from the USING file and labelled with its enclosing member —
+ * or explicitly as outside any member, which a read in a static initializer genuinely is.
+ *
+ * The banner about verdicts is load-bearing, not a caveat: direction and compatibility are group 4,
+ * and a list of twelve usages with no verdicts must not be able to read as twelve safe usages.
+ */
+function usagesHtml(n) {
+  const list = n.usages ?? [];
+  const uv = n.usageVerdicts;
+  const out = [`<h4>Usages <span class="n">${list.length}${
+    list.some((x) => x.inDiff) ? ` · ${list.filter((x) => x.inDiff).length} in this PR` : ''}</span></h4>`];
+
+  if (uv && uv.available === false) {
+    out.push(`<div class="partialBox">⚠ <b>Direction and verdicts not computed</b> — ${esc(uv.reason)}.
+      <span class="sm">These are the resolved usage sites. None of them has been judged safe.</span></div>`);
+  }
+  if (!list.length) {
+    out.push('<div class="absent">No usages resolved. This symbol WAS looked up — that is what makes zero a finding.</div>');
+    return out.join('');
+  }
+
+  const byFile = new Map();
+  for (const x of list) {
+    if (!byFile.has(x.path)) byFile.set(x.path, []);
+    byFile.get(x.path).push(x);
+  }
+  for (const [path, sites] of byFile) {
+    out.push(`<div class="useFile"><span class="mono">${esc(path.split('/').slice(-2).join('/'))}</span>
+      <span class="n">${sites.length}</span></div>`);
+    for (const x of sites) {
+      const lines = (x.excerpt?.lines ?? []).map((l) =>
+        `<div class="${l.isCallSite ? 'del' : 'ctx'}"><span class="ln">${l.line}</span>${esc(l.text)}</div>`).join('');
+      out.push(`<div class="site useSite">
+        <div class="hd">
+          <span class="loc">:${x.line}</span>
+          ${x.member ? `<span class="chip">in ${esc(bare(x.member))}</span>`
+            : '<span class="chip unknown">outside any member</span>'}
+          ${x.side === 'base' ? '<span class="note">base image</span>' : ''}
+          ${x.inDiff ? '<span class="chip">touched by this PR</span>' : ''}
+        </div>
+        ${x.excerpt?.absent ? '<div class="absent" style="padding:5px 7px">source unavailable at this revision</div>'
+          : `<pre class="diff">${lines}</pre>`}
+      </div>`);
+    }
+  }
+  return out.join('');
 }
 
 /**
