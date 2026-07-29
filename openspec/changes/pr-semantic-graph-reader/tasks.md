@@ -126,16 +126,17 @@
 ## 9. Review Write Path
 
 - [x] 9.1 Implement draft creation from a node or call-site excerpt with anchor resolution at draft time
+- [x] 9.1a Anchor a comment to any single diff line, taking the side from the row that produced it — `-` is base/LEFT, `+` and context are head/RIGHT — so every change kind including REMOVED is commentable inline (F19)
 - [x] 9.2 Implement draft-time anchor rejection with a stated reason when the location is not commentable
 - [x] 9.3 Implement the PR-level comment fallback for locations outside the diff
 - [x] 9.4 Implement suggestion-block drafting for single-line and multi-line ranges
 - [x] 9.5 Implement local draft persistence and restoration across restarts, with no GitHub writes during drafting
 - [x] 9.6 Implement batch review assembly, one review per PR, with COMMENT, APPROVE, and REQUEST_CHANGES events
-- [ ] 9.7 Implement shared-body comments applied across multiple PRs with per-PR anchors
+- [x] 9.7 Implement shared-body comments applied across multiple PRs with per-PR anchors — targets are PRs whose own change units declare the same FQN; a PR that does not is reported skipped with its reason rather than given an invented anchor
 - [x] 9.8 Implement the confirmation step rendering the exact payload and requiring explicit approval
 - [x] 9.9 Implement the pre-submission stale-head check that blocks submission and prompts re-ingestion
 - [x] 9.10 Implement submission outcome reporting, per-PR partial-failure handling, and retention of failed drafts
-- [x] 9.11 Implement existing-thread display on matching nodes, replies, and thread resolution through the same confirmation flow
+- [x] 9.11 Implement existing-thread display on matching nodes, replies, and thread resolution through the same confirmation flow — was previously checked with only the server half built and no UI caller at all (F20); the thread section, the three load states, and the confirmed reply now exist
 - [x] 9.12 Write write-path tests against a mocked GitHub API asserting no writes occur before confirmation
 
 ## 10. Validation and Hardening

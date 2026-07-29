@@ -4,11 +4,12 @@
 // mock records every call, and the tests check the recorder is empty where it must be.
 
 import { openDb } from '../src/store/db.mjs';
-import { saveAnalysis } from '../src/store/persist.mjs';
+import { saveAnalysis, loadUnits } from '../src/store/persist.mjs';
 import { createApiServer } from '../src/server/server.mjs';
 import {
   createDraft, listDrafts, deleteDraft, updateDraft, previewReview, submitReview,
   headMoved, fetchThreads, replyToThread, suggestionBody, anchorable, EVENTS,
+  sharedTargets, createSharedDraft, listGroup, updateGroup, deleteGroup,
 } from '../src/review/drafts.mjs';
 import { parseSymbols } from '../src/java/parse.mjs';
 import { diffSymbols, classifyNoise } from '../src/java/diff.mjs';
@@ -406,6 +407,265 @@ await t('unknown PR is a 404 on every write route', async () => {
     const { status } = await call(server, m, `/api/pr/nope%231${p}`, m === 'POST' ? { path: 'x' } : undefined);
     assert.equal(status, 404, `${m} ${p}`);
   }
+});
+
+// ---------------------------------------------------------------- shared findings (9.7)
+//
+// One body, several PRs, each anchored to its own location. The point of these tests is that the
+// anchors are resolved PER PR: a line number from one repository must never be reused in another.
+
+// A second repository declaring the SAME FQN, inside the same cache layout so the server's
+// clone-path resolution is exercised for both.
+function fixture2() {
+  const dir = join(F.cache, 'clones', 'acme__lib');
+  mkdirSync(join(dir, 'src/main/java/com/acme'), { recursive: true });
+  const git = (...a) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
+  git('init', '-q'); git('config', 'user.email', 't@e.com'); git('config', 'user.name', 'T');
+
+  // Padded so f() sits at a different line number than it does in acme/svc — if the code ever
+  // reused the source PR's line, these tests would catch it.
+  const v1 = `package com.acme;
+
+// padding
+// padding
+// padding
+// padding
+public class Svc {
+  public void f(String s) {
+    log(s);
+  }
+}
+`;
+  writeFileSync(join(dir, REL), v1);
+  git('add', '-A'); git('commit', '-qm', 'v1');
+  const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+  const v2 = v1.replace('public void f(String s) {\n    log(s);', 'public void f(String s, int n) {\n    log(s);\n    log(n);');
+  writeFileSync(join(dir, REL), v2);
+  git('add', '-A'); git('commit', '-qm', 'v2');
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+  return { dir, base, head, v1, v2 };
+}
+
+const F2 = fixture2();
+const PRID2 = 'acme/lib#9';
+
+/** Both PRs in one store, which is what sharedTargets searches. */
+function twoPrDb(dbPath) {
+  const db = dbPath ? openDb(dbPath) : openDb(join(mkdtempSync(join(tmpdir(), 'cspider-shdb-')), 'db.sqlite'));
+  for (const [nwo, number, f, repo] of [['acme/svc', 7, F, 'svc'], ['acme/lib', 9, F2, 'lib']]) {
+    const baseT = new Map([[REL, parseSymbols(f.v1, REL)]]);
+    const headT = new Map([[REL, parseSymbols(f.v2, REL)]]);
+    const { units } = diffSymbols(nwo, baseT, headT);
+    for (const u of units) { u.severity = provisionalSeverity(u); u.noise = classifyNoise(u); }
+    saveAnalysis(db, {
+      pr: { nwo, number, repo },
+      meta: { headRefOid: f.head, title: 'T', url: 'u' },
+      mergeBase: f.base, buildRoots: { primary: '.' }, units, graph: null,
+    });
+  }
+  return db;
+}
+
+const prsForTargets = (db) => db.prepare('SELECT * FROM prs').all()
+  .map((r) => ({ prId: r.id, units: loadUnits(db, r.id, r.head_sha) ?? [] }));
+
+const modifiedF = (db, prId, headSha) =>
+  (loadUnits(db, prId, headSha) ?? []).find((u) => u.fqn.includes('#f(') && u.changeKind === 'MODIFIED')
+  ?? (loadUnits(db, prId, headSha) ?? []).find((u) => u.fqn.includes('#f('));
+
+console.log('\nwrite — shared findings across PRs (9.7)');
+
+await t('the same symbol in another PR is found as a target, with that PR\'s own line', async () => {
+  const db = twoPrDb();
+  const src = modifiedF(db, PRID, F.head);
+  const { targets } = sharedTargets(db, { fqn: src.fqn, sourcePrId: PRID, prs: prsForTargets(db) });
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].prId, PRID2);
+  const mine = modifiedF(db, PRID2, F2.head);
+  assert.equal(targets[0].line, mine.symbol.range.start.line + 1);
+  assert.notEqual(targets[0].line, src.symbol.range.start.line + 1,
+    'acme/lib is padded, so reusing the source line would be a bug');
+});
+
+await t('the source PR is never its own target', async () => {
+  const db = twoPrDb();
+  const src = modifiedF(db, PRID, F.head);
+  const { targets } = sharedTargets(db, { fqn: src.fqn, sourcePrId: PRID, prs: prsForTargets(db) });
+  assert.ok(!targets.some((x) => x.prId === PRID), 'would double-comment the PR being reviewed');
+});
+
+await t('a PR that does not change the symbol is skipped WITH a reason, not dropped', async () => {
+  const db = twoPrDb();
+  const { targets, skipped } = sharedTargets(db,
+    { fqn: 'com.acme.Nowhere#gone()', sourcePrId: PRID, prs: prsForTargets(db) });
+  assert.equal(targets.length, 0);
+  assert.equal(skipped.length, 1, 'the other PR must be accounted for, not omitted');
+  assert.match(skipped[0].reason, /does not change/);
+});
+
+await t('a REMOVED symbol is targeted on the base side (F19)', async () => {
+  const db = twoPrDb();
+  const prs = prsForTargets(db);
+  // Force the change kind, since both fixtures modify rather than delete.
+  const unit = prs.find((p) => p.prId === PRID2).units.find((u) => u.fqn.includes('#f('));
+  unit.changeKind = 'REMOVED';
+  const { targets } = sharedTargets(db, { fqn: unit.fqn, sourcePrId: PRID, prs });
+  assert.equal(targets[0].side, 'LEFT', 'deleted code exists only at base');
+});
+
+await t('one body becomes one draft per PR, sharing a group id', async () => {
+  const db = twoPrDb();
+  const t1 = modifiedF(db, PRID, F.head);
+  const t2 = modifiedF(db, PRID2, F2.head);
+  const out = createSharedDraft(db, {
+    body: 'this pattern is wrong in both repos',
+    targets: [
+      { prId: PRID, unitId: t1.id, path: REL, line: F.v2.split('\n').findIndex((l) => l.includes('log(n)')) + 1, clonePath: F.dir, pr: { ...PR } },
+      { prId: PRID2, unitId: t2.id, path: REL, line: F2.v2.split('\n').findIndex((l) => l.includes('log(n)')) + 1, clonePath: F2.dir, pr: { nwo: 'acme/lib', number: 9, headSha: F2.head, mergeBase: F2.base, files: [{ filename: REL }] } },
+    ],
+  });
+  assert.equal(out.created, 2);
+  const a = listDrafts(db, PRID);
+  const b = listDrafts(db, PRID2);
+  assert.equal(a.length, 1);
+  assert.equal(b.length, 1);
+  assert.equal(a[0].groupId, out.groupId);
+  assert.equal(b[0].groupId, out.groupId);
+  assert.equal(a[0].body, b[0].body, 'one body');
+  assert.equal(a[0].commitSha, F.head);
+  assert.equal(b[0].commitSha, F2.head, 'each draft pins its own PR\'s head');
+  assert.equal(listGroup(db, out.groupId).length, 2);
+});
+
+await t('each PR resolves its own anchor, and a mixed outcome is reported per PR', async () => {
+  const db = twoPrDb();
+  const t1 = modifiedF(db, PRID, F.head);
+  const out = createSharedDraft(db, {
+    body: 'shared',
+    targets: [
+      { prId: PRID, unitId: t1.id, path: REL, line: F.v2.split('\n').findIndex((l) => l.includes('log(n)')) + 1, clonePath: F.dir, pr: { ...PR } },
+      // Not in acme/lib's diff at all — must fall back on its own, not inherit PR 1's success.
+      { prId: PRID2, path: 'src/main/java/com/acme/Elsewhere.java', line: 400, clonePath: F2.dir, pr: { nwo: 'acme/lib', number: 9, headSha: F2.head, mergeBase: F2.base, files: [{ filename: REL }] } },
+    ],
+  });
+  const byPr = Object.fromEntries(out.results.map((r) => [r.prId, r]));
+  assert.equal(byPr[PRID].scope, 'inline');
+  assert.equal(byPr[PRID2].scope, 'pr');
+  assert.ok(byPr[PRID2].reason, 'the fallback must state why');
+  assert.equal(out.created, 2, 'a pr-level fallback is still a saved draft');
+});
+
+await t('editing a shared finding edits every unsubmitted sibling', async () => {
+  const db = twoPrDb();
+  const t1 = modifiedF(db, PRID, F.head);
+  const t2 = modifiedF(db, PRID2, F2.head);
+  const mk = (prId, f, dir, unitId) => ({
+    prId, unitId, path: REL, line: f.v2.split('\n').findIndex((l) => l.includes('log(n)')) + 1,
+    clonePath: dir, pr: { nwo: prId.split('#')[0], number: Number(prId.split('#')[1]), headSha: f.head, mergeBase: f.base, files: [{ filename: REL }] },
+  });
+  const out = createSharedDraft(db, { body: 'v1', targets: [mk(PRID, F, F.dir, t1.id), mk(PRID2, F2, F2.dir, t2.id)] });
+  assert.equal(updateGroup(db, out.groupId, 'v2 everywhere'), 2);
+  assert.equal(listDrafts(db, PRID)[0].body, 'v2 everywhere');
+  assert.equal(listDrafts(db, PRID2)[0].body, 'v2 everywhere');
+  assert.equal(deleteGroup(db, out.groupId), 2);
+  assert.equal(listDrafts(db, PRID).length, 0);
+  assert.equal(listDrafts(db, PRID2).length, 0);
+});
+
+await t('a shared finding still submits as one review per PR', async () => {
+  const db = twoPrDb();
+  const t1 = modifiedF(db, PRID, F.head);
+  const t2 = modifiedF(db, PRID2, F2.head);
+  const mk = (prId, f, dir, unitId) => ({
+    prId, unitId, path: REL, line: f.v2.split('\n').findIndex((l) => l.includes('log(n)')) + 1,
+    clonePath: dir, pr: { nwo: prId.split('#')[0], number: Number(prId.split('#')[1]), headSha: f.head, mergeBase: f.base, files: [{ filename: REL }] },
+  });
+  createSharedDraft(db, { body: 'shared finding', targets: [mk(PRID, F, F.dir, t1.id), mk(PRID2, F2, F2.dir, t2.id)] });
+
+  const p1 = previewReview(db, PRID, { ...PR }, 'COMMENT');
+  const p2 = previewReview(db, PRID2, { nwo: 'acme/lib', number: 9, headSha: F2.head }, 'COMMENT');
+  assert.equal(p1.payload.comments.length, 1);
+  assert.equal(p2.payload.comments.length, 1);
+  assert.equal(p1.payload.commit_id, F.head);
+  assert.equal(p2.payload.commit_id, F2.head, 'each review pins its own head, not the other PR\'s');
+  assert.notEqual(p1.endpoint, p2.endpoint);
+});
+
+await t('a shared draft reaches GitHub only through the normal confirmed submit', async () => {
+  const gh = mockGh({ headRefOid: { headRefOid: F.head }, reviews: { id: 555 } });
+  const db = twoPrDb();
+  const t1 = modifiedF(db, PRID, F.head);
+  createSharedDraft(db, {
+    body: 'shared',
+    targets: [{ prId: PRID, unitId: t1.id, path: REL, line: F.v2.split('\n').findIndex((l) => l.includes('log(n)')) + 1, clonePath: F.dir, pr: { ...PR } }],
+  }, {});
+  assert.equal(gh.calls.length, 0, 'creating a shared draft must not touch GitHub');
+  const r = submitReview(db, PRID, { ...PR }, { event: 'COMMENT', confirmed: false }, gh);
+  assert.equal(r.submitted, false);
+  assert.equal(gh.calls.length, 0);
+  // And with confirmation it does go, so the refusal above is the flag's doing, not a broken call.
+  const ok = submitReview(db, PRID, { ...PR }, { event: 'COMMENT', confirmed: true }, gh);
+  assert.equal(ok.submitted, true);
+  assert.equal(gh.writes().length, 1, 'exactly one review per PR, even for a shared finding');
+});
+
+console.log('\nwrite — shared findings over HTTP');
+
+await t('GET /api/shared/targets reports targets and skips together', async () => {
+  const gh = mockGh();
+  const dir = mkdtempSync(join(tmpdir(), 'cspider-shapi-'));
+  const dbPath = join(dir, 'db.sqlite');
+  const db = twoPrDb(dbPath);
+  const src = modifiedF(db, PRID, F.head);
+  const { server } = createApiServer({ cacheDir: F.cache, dbPath, gh });
+  const { status, body } = await call(server, 'GET',
+    `/api/shared/targets?prId=${ENC}&unitId=${encodeURIComponent(src.id)}`);
+  assert.equal(status, 200);
+  assert.equal(body.targets.length, 1);
+  assert.equal(body.targets[0].prId, PRID2);
+  assert.equal(gh.calls.length, 0);
+});
+
+await t('POST /api/shared/drafts creates one draft per PR and returns per-PR outcomes', async () => {
+  const gh = mockGh();
+  const dir = mkdtempSync(join(tmpdir(), 'cspider-shapi2-'));
+  const dbPath = join(dir, 'db.sqlite');
+  const db = twoPrDb(dbPath);
+  const src = modifiedF(db, PRID, F.head);
+  const tgt = await call(createApiServer({ cacheDir: F.cache, dbPath, gh }).server, 'GET',
+    `/api/shared/targets?prId=${ENC}&unitId=${encodeURIComponent(src.id)}`);
+  const { status, body } = await call(createApiServer({ cacheDir: F.cache, dbPath, gh }).server,
+    'POST', '/api/shared/drafts', { body: 'one finding, two PRs', targets: tgt.body.targets });
+  assert.equal(status, 200);
+  assert.equal(body.results.length, 1);
+  assert.ok(body.groupId);
+  assert.equal(gh.calls.length, 0, 'no GitHub call while drafting');
+
+  const listed = await call(createApiServer({ cacheDir: F.cache, dbPath, gh }).server, 'GET',
+    `/api/pr/${encodeURIComponent(PRID2)}/drafts`);
+  assert.equal(listed.body.pending, 1);
+  assert.equal(listed.body.drafts[0].groupId, body.groupId);
+});
+
+await t('a shared comment with no targets is refused', async () => {
+  const gh = mockGh();
+  const dir = mkdtempSync(join(tmpdir(), 'cspider-shapi3-'));
+  const dbPath = join(dir, 'db.sqlite');
+  twoPrDb(dbPath);
+  const { status } = await call(createApiServer({ cacheDir: F.cache, dbPath, gh }).server,
+    'POST', '/api/shared/drafts', { body: 'x', targets: [] });
+  assert.equal(status, 400);
+});
+
+await t('a shared comment naming an unknown PR is a 404 and writes nothing', async () => {
+  const gh = mockGh();
+  const dir = mkdtempSync(join(tmpdir(), 'cspider-shapi4-'));
+  const dbPath = join(dir, 'db.sqlite');
+  const db = twoPrDb(dbPath);
+  const { status } = await call(createApiServer({ cacheDir: F.cache, dbPath, gh }).server,
+    'POST', '/api/shared/drafts', { body: 'x', targets: [{ prId: 'nope#1', path: REL, line: 1 }] });
+  assert.equal(status, 404);
+  assert.equal(listDrafts(db, PRID).length, 0, 'a bad target must not half-create the group');
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

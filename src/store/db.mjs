@@ -10,8 +10,6 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-const SCHEMA_VERSION = 3;
-
 const MIGRATIONS = [
   // v1
   `
@@ -139,7 +137,20 @@ const MIGRATIONS = [
   `
   ALTER TABLE prs ADD COLUMN graph_meta TEXT;
   `,
+  // v4 — shared-body comments (9.7). One finding that spans several PRs is still one comment per
+  // PR, each anchored to its own location, because a line number means nothing outside its repo.
+  // The group id is what lets those siblings be listed, edited and withdrawn as the single finding
+  // the reviewer thinks of them as.
+  `
+  ALTER TABLE drafts ADD COLUMN group_id TEXT;
+  CREATE INDEX IF NOT EXISTS drafts_by_group ON drafts (group_id);
+  `,
 ];
+
+// Derived, never declared. A hand-maintained constant beside this array is a second source of
+// truth, and when the two drift the stored version stops advancing — so every later `openDb` re-runs
+// the last migration and dies on `duplicate column name`. Adding a migration is now one edit.
+const SCHEMA_VERSION = MIGRATIONS.length;
 
 export function openDb(path) {
   mkdirSync(dirname(path), { recursive: true });

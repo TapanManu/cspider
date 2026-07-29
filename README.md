@@ -18,8 +18,7 @@ for overrides, and risk scoring.
 and with `--resolve`: **blast-radius expansion** to depth 2 with disclosed truncation, `CO_CHANGED`
 history correlation, `TEST_COVERS`, and topological review ordering.
 
-**Not built yet:** the plugin contract extraction (Phase B), persistence, the local server API,
-the UI, and comment posting.
+**Not built yet:** the plugin contract extraction (Phase B) and Monaco-based before/after blocks.
 
 ## Quick start
 
@@ -114,9 +113,14 @@ complete one.
 
 ### Commenting and submitting a review
 
-Comment on any call site or on the change itself. Drafts are stored locally in SQLite and shown in
-the **drafts** drawer; nothing reaches GitHub until you preview the payload and confirm it.
+Comment on any call site, on the change itself, or **on any single line of the diff** — click a line
+number in the diff and the box opens against that line. Drafts are stored locally in SQLite and
+shown in the **drafts** drawer; nothing reaches GitHub until you preview the payload and confirm it.
 
+- **The anchor's side comes from the line, never from an assumption.** A deleted (`-`) line is
+  addressed at base/`LEFT`, an added or context line at head/`RIGHT`. This holds for every change
+  kind, so a REMOVED member is commentable inline on the code that was deleted rather than
+  degrading to a PR-level comment. Sending a base line as `RIGHT` is the F13/F19 trap.
 - **Anchors resolve when you write the comment**, not at submit time. A line GitHub can anchor
   becomes an inline comment; a line outside the diff becomes a pull-request level comment with its
   location preserved in the body, and the reason is stated. Discovering an unanchorable comment at
@@ -133,6 +137,25 @@ the **drafts** drawer; nothing reaches GitHub until you preview the payload and 
 - **A rejected submit retains every draft**, and already-submitted drafts are never resent.
 
 Events: `COMMENT`, `REQUEST_CHANGES`, `APPROVE`.
+
+**Existing conversations** already on GitHub appear in a **Conversation** section on the change,
+matched to the selected symbol's own line range (and labelled *in this file* when the range is not
+known). They load after first paint, because the paginated GitHub call must not delay the graph. A
+failure to load says so — an empty thread list and an unreachable API must not look alike.
+
+Replying is the one write that is **not** a draft: it posts as soon as it is confirmed, so the reply
+box says that outright, and the confirmation still renders the exact endpoint and JSON body first.
+
+**One finding across several PRs.** When the same symbol is changed by more than one ingested PR,
+*…and on other PRs* applies a single body to each of them — **one comment per PR, each anchored to
+its own location**, because a line number means nothing outside its own repository. Each PR's anchor
+resolves independently and the per-PR outcome is shown, so one PR anchoring inline while another
+falls back to pr-level is visible rather than averaged into "saved".
+
+A PR that does *not* change that symbol is listed as **not applicable** with the reason. Inventing a
+location there would be worse than omitting the comment. Siblings share a group id, so the finding
+can be edited or withdrawn everywhere at once, and each still submits inside its own PR's single
+review pinned to that PR's own head SHA.
 
 ### Graph cache
 
@@ -189,7 +212,7 @@ Give it every PR of one logical change and the cross-PR section will link them:
 ## Tests
 
 ```bash
-npm test    # 107 cases across six suites:
+npm test    # 146 cases across seven suites:
             #   diff    — parsing, delta types, change kinds, rename/move, noise
             #   compat  — signature compatibility and BROKEN/UPDATED/SAFE verdicts
             #   graph   — break analysis, indirect fan-in, UNKNOWN handling, and
@@ -200,8 +223,9 @@ npm test    # 107 cases across six suites:
             #             blocks, and CALLS edge identity, against a real git repo
             #   server  — API contract, including that a bounded or degraded
             #             analysis cannot be served as if it were complete
-            #   write   — drafts, anchoring, suggestions, stale-head blocking, and
-            #             that NOTHING reaches GitHub without explicit confirmation
+            #   write   — drafts, anchoring, suggestions, stale-head blocking, threads,
+            #             shared findings with per-PR anchors, and that NOTHING reaches
+            #             GitHub without explicit confirmation
 ```
 
 A real PR that updated all of its call sites cannot exercise `BROKEN`, so the verdict logic is

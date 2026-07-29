@@ -63,13 +63,96 @@ export function createDraft(db, { prId, pr, unitId, path, line, endLine, side = 
 
   const draftId = randomUUID();
   db.prepare(`
-    INSERT INTO drafts (draft_id, pr_id, unit_id, path, line, end_line, side, commit_sha, body, suggestion, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO drafts (draft_id, pr_id, unit_id, path, line, end_line, side, commit_sha, body, suggestion, created_at, group_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(draftId, prId, unitId ?? null, path, line ?? null, endLine ?? null,
-    scope === 'inline' ? side : null, pr.headSha, finalBody, suggestion ?? null, Date.now());
+    scope === 'inline' ? side : null, pr.headSha, finalBody, suggestion ?? null, Date.now(),
+    opts.groupId ?? null);
 
-  return { draftId, scope, reason: check.ok ? null : check.reason };
+  return { draftId, scope, reason: check.ok ? null : check.reason, groupId: opts.groupId ?? null };
 }
+
+/**
+ * Task 9.7 — one finding, several PRs.
+ *
+ * "The same finding" means the same symbol, so a target is a PR whose own change units declare the
+ * same FQN. A PR that does not touch that symbol is NOT a target: applying the comment there would
+ * mean inventing a location, and a made-up anchor is worse than no comment. Such PRs are returned
+ * as skipped with the reason, never silently dropped.
+ *
+ * Each target carries its OWN anchor. Line numbers are meaningless across repositories, and the
+ * side follows the same rule as everywhere else (F19) — a REMOVED symbol exists only at base.
+ */
+export function sharedTargets(db, { fqn, sourcePrId, prs }) {
+  const targets = [];
+  const skipped = [];
+  for (const pr of prs) {
+    if (pr.prId === sourcePrId) continue;
+    const match = (pr.units ?? []).find((u) => u.fqn === fqn);
+    if (!match) {
+      skipped.push({ prId: pr.prId, reason: `does not change ${fqn}` });
+      continue;
+    }
+    const line = match.symbol?.range?.start?.line != null ? match.symbol.range.start.line + 1 : null;
+    if (line == null) {
+      skipped.push({ prId: pr.prId, reason: `no line range recorded for ${fqn}` });
+      continue;
+    }
+    targets.push({
+      prId: pr.prId, unitId: match.id, path: match.path, line,
+      side: match.changeKind === 'REMOVED' ? 'LEFT' : 'RIGHT',
+      changeKind: match.changeKind,
+    });
+  }
+  return { targets, skipped };
+}
+
+/**
+ * Apply one body to a finding in several PRs. Every PR's anchor is resolved independently and its
+ * outcome reported per PR — one PR anchoring inline while another falls back to pr-level is normal
+ * and must be visible, not averaged into a single "saved" message.
+ *
+ * A partial result is kept, not rolled back: the drafts that did resolve are worth having, and
+ * nothing has reached GitHub yet anyway.
+ */
+export function createSharedDraft(db, { targets, body, suggestion }, opts = {}) {
+  if (!body && !suggestion) throw new Error('a draft needs a body or a suggestion');
+  if (!targets?.length) throw new Error('no target PRs for a shared comment');
+
+  const groupId = randomUUID();
+  const results = [];
+  for (const t of targets) {
+    try {
+      const out = createDraft(db, {
+        prId: t.prId, pr: t.pr, unitId: t.unitId, path: t.path,
+        line: t.line, side: t.side ?? 'RIGHT', body, suggestion,
+      }, { clonePath: t.clonePath ?? opts.clonePath, groupId });
+      results.push({ prId: t.prId, ok: true, ...out, path: t.path, line: t.line, side: t.side });
+    } catch (e) {
+      // A suggestion refused outside the diff is the common case here, and it is per-PR.
+      results.push({ prId: t.prId, ok: false, error: e.message, path: t.path, line: t.line });
+    }
+  }
+  return {
+    groupId,
+    results,
+    created: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+  };
+}
+
+/** Every draft sharing one body, across all PRs — the finding as the reviewer conceived it. */
+export const listGroup = (db, groupId) =>
+  db.prepare('SELECT * FROM drafts WHERE group_id = ? ORDER BY pr_id, created_at').all(groupId).map(shape);
+
+/** Editing a shared finding edits it everywhere it has not already been sent. */
+export const updateGroup = (db, groupId, body) =>
+  db.prepare('UPDATE drafts SET body = ? WHERE group_id = ? AND submitted_at IS NULL')
+    .run(body, groupId).changes;
+
+export const deleteGroup = (db, groupId) =>
+  db.prepare('DELETE FROM drafts WHERE group_id = ? AND submitted_at IS NULL')
+    .run(groupId).changes;
 
 export const listDrafts = (db, prId) =>
   db.prepare('SELECT * FROM drafts WHERE pr_id = ? ORDER BY created_at').all(prId).map(shape);
@@ -80,6 +163,7 @@ const shape = (r) => ({
   suggestion: r.suggestion, createdAt: r.created_at,
   submittedAt: r.submitted_at, reviewId: r.submitted_review_id,
   scope: r.side ? 'inline' : 'pr',
+  groupId: r.group_id ?? null,
 });
 
 export const deleteDraft = (db, prId, draftId) =>
