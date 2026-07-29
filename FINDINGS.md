@@ -828,3 +828,56 @@ was indistinguishable from a click that failed.
 A crumb above the tree now always names the selection and, when it is context, says the PR does not
 change its file. The rule this is an instance of: a view that cannot answer a question must say so.
 Silence gets read as malfunction, and the reviewer starts distrusting the parts that do work.
+
+## Variable usage tracing, stage A (1.1–1.3, 5.1–5.5)
+
+### Finding F24 (correctness) — the A2 invariant was unreachable, not merely unimplemented
+
+`build.mjs` selected resolution targets with
+`.filter((u) => u.kind === 'METHOD' || u.kind === 'CONSTRUCTOR')`. The loop that marks a symbol
+UNKNOWN runs over `members.slice(maxSymbols)` — i.e. over that same filtered list. So a field was not
+resolved *and* could never be marked as unresolved: it fell out of the pipeline before the invariant
+was applied.
+
+Measured on `sedai-simulation-server#244` before the fix: all 7 field units carried
+`unknown: null`, `fanIn: null`, and rendered as `0 callers · 0 callees — no resolved callers or
+callees`. Three of those fields are REMOVED. For a removal, *nothing uses this* and *we never looked*
+have opposite consequences — the first says the deletion is clean, the second hides every unupdated
+reader.
+
+This is a sharper form of A1/A2 than the ones already recorded. F13 and F19 were cases of the rule
+being applied to the wrong value; this was the rule's enforcement point being structurally
+unreachable for an entire symbol kind. **A guard placed inside the filtered set cannot guard what the
+filter removed.**
+
+The fix marks every unresolved unit, not only fields — the same hole applies to CLASS, INTERFACE,
+ENUM, RECORD and ANNOTATION_TYPE units, none of which are resolved either. After: `unknown: 7` in the
+PR header where it previously read 0.
+
+It also had to be fixed in two places. The detail pane renders `unknownBox`, but the impact pane
+appended its own `— no resolved callers or callees`, which restated the same false negative in a
+different pane. That string is now reached only when resolution actually ran.
+
+### External bindings cost nothing and were already sitting in the data
+
+`@Value("${REUSE_SESSION:false}")` was already persisted in `symbol.annotations`. Extracting the key
+needs no resolution, no language server, and no new query — it is a regex over data the parser has
+been storing all along. On PR 244 it yields, for free:
+
+```
+RETIRED  DeploymentManagementService.reuseSession   key=REUSE_SESSION  default="false"
+RETIRED  SessionService.resetCore                   key=RESET_CORE     default="false"
+RETIRED  SessionService.reuseSession                key=REUSE_SESSION  default="false"
+```
+
+Three of seven fields disclose a retired deployment key; the other four (two `@Mock`, two
+unannotated) correctly disclose nothing rather than an empty box.
+
+Every disclosure states that consumers of the key are outside the analysis. Without that sentence the
+empty consumer list would read as *nothing consumes it* — the identical false negative to the one
+above, arrived at from the opposite direction. The tool does not grep charts or environment files for
+the key: R6 forbids presenting name matches in the visual language of resolved edges, and a retired
+key is worth reporting even with its consumers unknown.
+
+The default value is captured deliberately. A key that defaulted to `false` and a key with no default
+carry different risk when removed.

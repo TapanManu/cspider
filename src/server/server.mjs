@@ -12,6 +12,7 @@ import { openDb } from '../store/db.mjs';
 import { loadGraph, loadGraphMeta, loadUnits, loadReviewed, markReviewed, unmarkReviewed, progress }
   from '../store/persist.mjs';
 import { beforeAfter, callSiteExcerpt, symbolBlocks } from '../ingest/source.mjs';
+import { bindingChange } from '../java/bindings.mjs';
 import { orderUnits, bySeverity } from '../review/order.mjs';
 import { topologicalOrder } from '../graph/build.mjs';
 import { createDraft, listDrafts, deleteDraft, updateDraft, previewReview, submitReview,
@@ -326,6 +327,10 @@ export function createApiServer({ cacheDir, dbPath, gh }) {
           fqn: unit.fqn, kind: unit.kind, path: unit.path, changeKind: unit.changeKind,
           deltas: unit.deltas, signatureChange: unit.signatureChange, noise: unit.noise,
           from: unit.from,
+          // A field's annotations can bind it to a name outside the codebase. Removing such a field
+          // retires a deployment key or breaks a wire contract, and nothing else in this payload
+          // would ever say so (5.2).
+          binding: bindingChange(unit),
           symbol: unit.symbol ? {
             signature: unit.symbol.signature, visibility: unit.symbol.visibility,
             annotations: unit.symbol.annotations, modifiers: unit.symbol.modifiers,

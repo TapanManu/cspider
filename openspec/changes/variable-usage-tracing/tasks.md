@@ -1,8 +1,8 @@
 ## 1. Stop the silent false negative (ships alone, first)
 
-- [ ] 1.1 Mark every unresolved FIELD and ENUM_CONSTANT change unit UNKNOWN with a stated reason, so a field never renders as having zero usages when it was never looked up (D1)
-- [ ] 1.2 Render that UNKNOWN in the detail pane and the impact view, distinct from an empty result
-- [ ] 1.3 Test: a field in an unresolved run, a field beyond the budget, and a REMOVED field with no base image each report UNKNOWN with their own reason, and none reports zero usages
+- [x] 1.1 Mark every unresolved FIELD and ENUM_CONSTANT change unit UNKNOWN with a stated reason, so a field never renders as having zero usages when it was never looked up (D1)
+- [x] 1.2 Render that UNKNOWN in the detail pane and the impact view, distinct from an empty result
+- [x] 1.3 Test: a field in an unresolved run, a field beyond the budget, and a REMOVED field with no base image each report UNKNOWN with their own reason, and none reports zero usages
 
 ## 2. Field resolution
 
@@ -36,11 +36,11 @@
 
 ## 5. External bindings
 
-- [ ] 5.1 Extract the bound key from `@Value`, `@ConfigurationProperties`, `@JsonProperty`, `@JsonAlias`, `@Column`, and `@SerializedName`, as a data table rather than logic (D5)
-- [ ] 5.2 Report a removed or renamed binding as an external contract change, separate from code usage
-- [ ] 5.3 State that external consumers lie outside the analysed reach, and emit no edge for them
-- [ ] 5.4 Test that no name-matched external consumer is ever presented as a resolved usage
-- [ ] 5.5 Validate against `sedai-simulation-server#244`: removing the `@Value("${REUSE_SESSION:false}")` and `@Value("${RESET_CORE:false}")` fields reports both keys as retired
+- [x] 5.1 Extract the bound key from `@Value`, `@ConfigurationProperties`, `@JsonProperty`, `@JsonAlias`, `@Column`, and `@SerializedName`, as a data table rather than logic (D5)
+- [x] 5.2 Report a removed or renamed binding as an external contract change, separate from code usage
+- [x] 5.3 State that external consumers lie outside the analysed reach, and emit no edge for them
+- [x] 5.4 Test that no name-matched external consumer is ever presented as a resolved usage
+- [x] 5.5 Validate against `sedai-simulation-server#244`: removing the `@Value("${REUSE_SESSION:false}")` and `@Value("${RESET_CORE:false}")` fields reports both keys as retired
 
 ## 6. The usage trace view
 
@@ -54,7 +54,7 @@
 
 ## 7. Validation
 
-- [ ] 7.1 Validate against `sedai-simulation-server#244`: all 7 field units resolve or state why not, and none reports zero usages without having been looked up
+- [x] 7.1 Validate against `sedai-simulation-server#244`: all 7 field units resolve or state why not, and none reports zero usages without having been looked up
 - [ ] 7.2 Confirm `VclusterProperties.defaultVersion` reports VALUE_CHANGED with both initializer values, not SAFE
 - [ ] 7.3 Confirm the three REMOVED fields either list their base-image readers or state UNKNOWN with the missing-base reason
 - [ ] 7.4 Measure the added resolution cost per field and record it in FINDINGS, so the budget split in 2.4 rests on a number

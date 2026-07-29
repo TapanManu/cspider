@@ -298,5 +298,65 @@ await t('expansion never reclassifies a changed node as context', async () => {
   assert.ok([...g.nodes.values()].every((n) => !(n.origin === 'CONTEXT' && n.changeKind !== 'UNCHANGED')));
 });
 
+// ---------------------------------------------------------------- unresolved kinds are UNKNOWN
+//
+// A field is neither a METHOD nor a CONSTRUCTOR, so it never entered the member list and never
+// reached the loop that applies A2. The result was `unknown: null` and a rendering of "0 callers"
+// for a symbol nobody looked up — and for a REMOVED field, "nothing uses this" and "we never
+// looked" have opposite consequences.
+
+console.log('\ngraph — unresolved kinds declare themselves UNKNOWN (A2)');
+
+const withField = (before, after) => analysisOf(before, after, null);
+
+await t('a changed field is UNKNOWN with a reason, not zero usages', async () => {
+  const a = withField(
+    'private boolean flag = false;\n  public void f(String s) { g(); }',
+    'private boolean flag = true;\n  public void f(String s) { g(); }',
+  );
+  const g = await buildGraph(a, stubResolver([]), withLines());
+  const field = [...g.nodes.values()].find((n) => n.kind === 'FIELD');
+  assert.ok(field, 'the field is a change unit');
+  assert.ok(field.unknown, 'a field must not be left with unknown: null');
+  assert.match(field.unknown.reason, /not resolved|unknown, not absent/);
+  assert.equal(field.fanIn, null, 'and it must not claim a resolved fan-in');
+});
+
+await t('the reason distinguishes never-looked from looked-and-found-nothing', async () => {
+  // Both the field AND the method must change, or there is no resolved member to contrast against.
+  const a = withField(
+    'private boolean flag = false;\n  public void f(String s) { g(); }',
+    'private boolean flag = true;\n  public void f(String s) { g(1); }',
+  );
+  const g = await buildGraph(a, stubResolver([]), withLines());
+  const field = [...g.nodes.values()].find((n) => n.kind === 'FIELD');
+  const method = [...g.nodes.values()].find((n) => n.kind === 'METHOD');
+  // The method WAS resolved and genuinely has no callers: no unknown marker.
+  assert.equal(method.unknown, null, 'a resolved member with no callers is not UNKNOWN');
+  assert.ok(field.unknown, 'an unresolved field is UNKNOWN');
+  assert.notEqual(field.unknown.reason, method.unknown?.reason);
+});
+
+await t('a removed field is UNKNOWN rather than reported clean', async () => {
+  const a = withField(
+    'private boolean gone = false;\n  public void f(String s) { g(); }',
+    'public void f(String s) { g(); }',
+  );
+  const g = await buildGraph(a, stubResolver([]), withLines());
+  const field = [...g.nodes.values()].find((n) => n.kind === 'FIELD');
+  assert.equal(field.changeKind, 'REMOVED');
+  assert.ok(field.unknown, 'a REMOVED field claiming zero readers is the failure this prevents');
+});
+
+await t('a type change unit is UNKNOWN too, not only fields', async () => {
+  // The same unreachable-loop bug applies to every kind the member filter excludes.
+  const a = analysisOf('public void f(String s) { g(); }', 'public void f(String s) { g(); }', null);
+  const g = await buildGraph(a, stubResolver([]), withLines());
+  for (const n of g.nodes.values()) {
+    if (n.kind === 'METHOD' || n.kind === 'CONSTRUCTOR') continue;
+    assert.ok(n.unknown, `${n.kind} must declare itself unresolved`);
+  }
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

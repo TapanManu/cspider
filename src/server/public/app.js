@@ -599,8 +599,19 @@ async function focus(id) {
 
   paint(edges + inner, { x1: -12, y1: -40, x2: x - HGAP + NW + 12, y2: laneH + 8 });
 
-  if (!ego.callers.length && !ego.callees.length) {
-    $('#impactSub').textContent += ' — no resolved callers or callees';
+  // "No resolved callers or callees" is a finding only if we looked. For a symbol that was never
+  // resolved — every field today — it is the same false negative the UNKNOWN marker exists to end,
+  // restated in a different pane (task 1.2).
+  if (!ego.callers.length && !ego.callees.length && !ego.tests.length) {
+    const why = ego.centre?.unknown;
+    if (why) {
+      $('#impactSub').textContent += ' — UNKNOWN, not empty';
+      $('#graph').insertAdjacentHTML('afterbegin',
+        `<div class="unknownOverlay"><b>UNKNOWN</b><span>${esc(typeof why === 'string' ? why : why.reason)}</span>
+         <span class="sm">Nothing here was ruled out. This symbol was not resolved.</span></div>`);
+    } else {
+      $('#impactSub').textContent += ' — no resolved callers or callees';
+    }
   }
 }
 
@@ -645,6 +656,8 @@ async function renderDetail(id) {
     out.push(`<div class="unknownBox"><b>UNKNOWN</b> — ${esc(n.unknown.reason ?? n.unknown)}
       <span class="sm">Not analysed. That is not the same as “no impact”.</span></div>`);
   }
+
+  if (u?.binding) out.push(bindingHtml(u.binding));
 
   const v = d.callerSummary;
   if (v && (v.BROKEN || v.UPDATED || v.SAFE)) {
@@ -743,6 +756,42 @@ async function renderDetail(id) {
   wireDiffLines(el);
   wireThreads(el);
   if (u) wireShared(el, u.id);
+}
+
+/**
+ * A field's external binding (5.2, 5.3). This is the one consequence of a variable change that no
+ * amount of resolution can reach: the key lives in charts and environment config. So it is stated,
+ * along with the fact that its consumers are outside the analysis — an empty consumer list here is
+ * not a finding, and must not be able to read as one.
+ */
+function bindingHtml(b) {
+  const WORD = {
+    RETIRED: ['bad', 'no longer consumed by this code'],
+    INTRODUCED: ['info', 'newly consumed by this code'],
+    RENAMED: ['bad', 'renamed — the old name stops being accepted'],
+    UNCHANGED: ['info', 'unchanged'],
+  };
+  const [cls, phrase] = WORD[b.effect] ?? ['info', b.effect];
+  const row = (x, mark) => `<div class="bindRow">
+    ${mark ? `<span class="bindMark ${mark}">${mark === 'gone' ? '−' : '+'}</span>` : ''}
+    <code>${esc(x.key)}</code>
+    <span class="sm">${esc(x.what)}${x.fallback != null ? ` · default \`${esc(x.fallback)}\`` : ''}
+      · <span class="mono">@${esc(x.annotation)}</span></span>
+  </div>`;
+
+  const rows = [
+    ...b.retired.map((x) => row(x, 'gone')),
+    ...b.introduced.map((x) => row(x, 'new')),
+  ];
+  // A REMOVED field's binding is retired even though nothing was renamed, so fall back to listing
+  // what it was bound to rather than showing an empty box.
+  if (!rows.length) rows.push(...b.bindings.map((x) => row(x, b.effect === 'RETIRED' ? 'gone' : null)));
+
+  return `<div class="bindBox ${cls}">
+    <b>External contract — ${esc(phrase)}</b>
+    ${rows.join('')}
+    <div class="sm bindReach">⚠ ${esc(b.reach)}</div>
+  </div>`;
 }
 
 const fmt = (x) => (Array.isArray(x) ? (x.length ? x.join(' ') : '∅') : (x ?? '∅'));

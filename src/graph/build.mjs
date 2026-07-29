@@ -11,6 +11,23 @@ import { signatureCompatibility, isTestSource, isPublicApi } from '../java/compa
 
 export const VERDICTS = ['BROKEN', 'UNKNOWN', 'UPDATED', 'SAFE'];
 
+const TYPE_KINDS = new Set(['CLASS', 'INTERFACE', 'ENUM', 'RECORD', 'ANNOTATION_TYPE']);
+
+/**
+ * Why a change unit went unresolved. The reason has to distinguish *we looked and found nothing*
+ * from *we never looked*, because for a removed symbol those mean opposite things.
+ */
+export function unresolvedReason(u) {
+  if (u.noise?.length) return 'suppressed as low-signal, so it was not resolved';
+  if (u.kind === 'FIELD') {
+    return 'field usages are not resolved yet — its readers and writers are unknown, not absent';
+  }
+  if (TYPE_KINDS.has(u.kind)) {
+    return 'type references are not resolved yet — its users are unknown, not absent';
+  }
+  return `not resolved — no resolution is implemented for ${u.kind}`;
+}
+
 /**
  * @param analysis  one PR analysis
  * @param resolvers { head, base }  started JavaResolvers; base may be null
@@ -80,6 +97,21 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
   // A2: symbols we chose not to resolve are UNKNOWN, not SAFE.
   for (const u of members.slice(maxSymbols)) {
     nodes.get(u.id).unknown = { reason: `not resolved — beyond the --max-symbols cap` };
+  }
+
+  // ...and so is everything the member filter above excluded. A field is not a METHOD or a
+  // CONSTRUCTOR, so it never entered `members` and never reached the cap loop either — leaving
+  // `unknown: null` and a rendering of "0 callers" that reads as *nothing uses this* for a symbol
+  // nobody ever looked up. For a REMOVED field those two readings have opposite consequences.
+  //
+  // Measured on sedai-simulation-server#244: 7 of 44 units are fields, 3 of them REMOVED, all seven
+  // previously reporting zero usages with no reason given. A2 was not weakly applied here; the loop
+  // that applies it was unreachable.
+  const resolvedIds = new Set(selected.map((u) => u.id));
+  for (const u of analysis.units) {
+    const node = nodes.get(u.id);
+    if (!node || node.unknown || resolvedIds.has(u.id)) continue;
+    node.unknown = { reason: unresolvedReason(u) };
   }
 
   for (const u of selected) {

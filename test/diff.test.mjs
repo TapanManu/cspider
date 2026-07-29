@@ -1,6 +1,7 @@
 // Phase A fixture corpus (task 4.11, partial). Each case asserts one delta type or change kind.
 import { parseSymbols, parseImports } from '../src/java/parse.mjs';
 import { diffSymbols, unitId, classifyNoise } from '../src/java/diff.mjs';
+import { externalBindings, bindingChange } from '../src/java/bindings.mjs';
 import assert from 'node:assert';
 
 let pass = 0; let fail = 0;
@@ -194,6 +195,86 @@ t('reformatting only is not a change', () => {
     { [P]: wrap('void f() {\n\n      g();\n\n  }') },
   );
   assert.equal(units.length, 0, `expected none, got ${units.map((u) => u.fqn).join(', ')}`);
+});
+
+// ---------------------------------------------------------------- external bindings (5.1–5.4)
+//
+// A field's annotation can bind it to a name outside the codebase. Removing such a field retires a
+// deployment key or breaks a wire contract — a consequence absent from the diff, the call graph and
+// every test. Grounded in sedai-simulation-server#244, where two removed fields were annotated
+// `@Value("${REUSE_SESSION:false}")` and `@Value("${RESET_CORE:false}")`.
+
+console.log('\ndiff — external bindings on a field');
+
+const fieldSym = (annotations, kind = 'FIELD') => ({ kind, annotations });
+const keysOf = (sym) => externalBindings(sym).map((b) => b.key);
+
+t('a Spring config key and its default are extracted', () => {
+  const [b] = externalBindings(fieldSym(['@Value("${REUSE_SESSION:false}")']));
+  assert.equal(b.key, 'REUSE_SESSION');
+  assert.equal(b.kind, 'CONFIG_KEY');
+  // The default is part of the contract: a key that defaulted to false is a different risk from
+  // one with no default at all.
+  assert.equal(b.fallback, 'false');
+});
+
+t('a config key with no default has a null fallback, not an empty string', () => {
+  const [b] = externalBindings(fieldSym(['@Value("${PLAIN_KEY}")']));
+  assert.equal(b.key, 'PLAIN_KEY');
+  assert.equal(b.fallback, null);
+});
+
+t('wire names, aliases, columns and prefixes are all recognised', () => {
+  assert.deepEqual(keysOf(fieldSym(['@JsonProperty("session_id")'])), ['session_id']);
+  assert.deepEqual(keysOf(fieldSym(['@JsonAlias({"sid", "session"})'])), ['sid', 'session']);
+  assert.deepEqual(keysOf(fieldSym(['@Column(name = "session_id", nullable = false)'])), ['session_id']);
+  assert.deepEqual(keysOf(fieldSym(['@ConfigurationProperties(prefix = "vcluster")'])), ['vcluster']);
+});
+
+t('an unrecognised annotation produces no disclosure rather than a guess', () => {
+  assert.deepEqual(externalBindings(fieldSym(['@Mock'])), []);
+  assert.deepEqual(externalBindings(fieldSym(['@Autowired', '@Deprecated'])), []);
+  assert.deepEqual(externalBindings(fieldSym([])), []);
+});
+
+t('only fields carry external bindings', () => {
+  // A @Value on a method parameter or setter is a different construct; this module claims fields.
+  assert.deepEqual(externalBindings(fieldSym(['@Value("${X}")'], 'METHOD')), []);
+  assert.deepEqual(externalBindings(null), []);
+});
+
+t('removing an annotated field retires its key', () => {
+  const c = bindingChange({ changeKind: 'REMOVED', symbol: fieldSym(['@Value("${RESET_CORE:false}")']) });
+  assert.equal(c.effect, 'RETIRED');
+  assert.equal(c.bindings[0].key, 'RESET_CORE');
+});
+
+t('adding an annotated field introduces one', () => {
+  assert.equal(bindingChange({ changeKind: 'ADDED', symbol: fieldSym(['@Value("${NEW_KEY}")']) }).effect,
+    'INTRODUCED');
+});
+
+t('a renamed wire name reports both directions', () => {
+  const c = bindingChange({
+    changeKind: 'MODIFIED',
+    symbol: fieldSym(['@JsonProperty("newName")']),
+    from: { symbol: fieldSym(['@JsonProperty("oldName")']) },
+  });
+  assert.equal(c.effect, 'RENAMED');
+  assert.deepEqual(c.retired.map((x) => x.key), ['oldName']);
+  assert.deepEqual(c.introduced.map((x) => x.key), ['newName']);
+});
+
+t('a field with no binding produces no box at all', () => {
+  assert.equal(bindingChange({ changeKind: 'MODIFIED', symbol: fieldSym(['@Mock']) }), null);
+  assert.equal(bindingChange({ changeKind: 'MODIFIED', symbol: null }), null);
+});
+
+t('every disclosure states that consumers are out of reach', () => {
+  // Without this the empty consumer list could read as "nothing consumes it", which is the exact
+  // false negative this whole change exists to remove.
+  const c = bindingChange({ changeKind: 'REMOVED', symbol: fieldSym(['@Value("${K}")']) });
+  assert.match(c.reach, /outside this analysis/);
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
