@@ -15,7 +15,8 @@ import { beforeAfter, callSiteExcerpt, symbolBlocks } from '../ingest/source.mjs
 import { orderUnits, bySeverity } from '../review/order.mjs';
 import { topologicalOrder } from '../graph/build.mjs';
 import { createDraft, listDrafts, deleteDraft, updateDraft, previewReview, submitReview,
-  headMoved, fetchThreads, replyToThread, EVENTS } from '../review/drafts.mjs';
+  headMoved, fetchThreads, replyToThread, sharedTargets, createSharedDraft, listGroup,
+  updateGroup, deleteGroup, EVENTS } from '../review/drafts.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, 'public');
@@ -398,6 +399,71 @@ export function createApiServer({ cacheDir, dbPath, gh }) {
       } catch (e) {
         return { __status: 400, error: e.message };
       }
+    },
+
+    // ---------------------------------------------------------------- shared findings (9.7)
+    // Cross-PR by nature, so these are not nested under a single :prId.
+
+    'GET /api/shared/targets': ({ query }) => {
+      const src = prRow(query.prId);
+      if (!src) return { __status: 404, error: 'unknown PR' };
+      const units = loadUnits(db, query.prId, src.head_sha) ?? [];
+      const unit = units.find((u) => u.id === query.unitId);
+      if (!unit) return { __status: 404, error: 'unknown unit' };
+
+      const all = db.prepare('SELECT * FROM prs').all().map((r) => ({
+        prId: r.id, units: loadUnits(db, r.id, r.head_sha) ?? [],
+      }));
+      const { targets, skipped } = sharedTargets(db, {
+        fqn: unit.fqn, sourcePrId: query.prId, prs: all,
+      });
+      return { fqn: unit.fqn, sourcePrId: query.prId, targets, skipped };
+    },
+
+    'POST /api/shared/drafts': async ({ req }) => {
+      const b = await readBody(req);
+      if (!b.body && !b.suggestion) return { __status: 400, error: 'a body or a suggestion is required' };
+      const wanted = Array.isArray(b.targets) ? b.targets : [];
+      if (!wanted.length) return { __status: 400, error: 'no target PRs for a shared comment' };
+
+      // Each target is resolved against its OWN repository checkout and head SHA.
+      const targets = [];
+      for (const t of wanted) {
+        const row = prRow(t.prId);
+        if (!row) return { __status: 404, error: `unknown PR ${t.prId}` };
+        targets.push({
+          prId: t.prId, unitId: t.unitId, path: t.path, line: t.line, side: t.side ?? 'RIGHT',
+          clonePath: clonePathFor(cacheDir, row.nwo),
+          pr: {
+            nwo: row.nwo, number: row.number, headSha: row.head_sha, mergeBase: row.merge_base,
+            files: (loadUnits(db, t.prId, row.head_sha) ?? []).map((u) => ({ filename: u.path })),
+          },
+        });
+      }
+      try {
+        return { ok: true, ...createSharedDraft(db, { targets, body: b.body, suggestion: b.suggestion }) };
+      } catch (e) {
+        return { __status: 400, error: e.message };
+      }
+    },
+
+    'GET /api/shared/group': ({ query }) => {
+      const drafts = listGroup(db, query.groupId);
+      if (!drafts.length) return { __status: 404, error: 'no such group' };
+      return { groupId: query.groupId, drafts };
+    },
+
+    'POST /api/shared/group/update': async ({ req }) => {
+      const b = await readBody(req);
+      if (!b.body) return { __status: 400, error: 'body required' };
+      const changed = updateGroup(db, b.groupId, b.body);
+      return changed ? { ok: true, changed } : { __status: 404, error: 'no unsubmitted drafts in that group' };
+    },
+
+    'POST /api/shared/group/delete': async ({ req }) => {
+      const b = await readBody(req);
+      const changed = deleteGroup(db, b.groupId);
+      return changed ? { ok: true, changed } : { __status: 404, error: 'no unsubmitted drafts in that group' };
     },
 
     'POST /api/pr/:prId/drafts/delete': async ({ params, req }) => {

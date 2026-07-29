@@ -33,7 +33,12 @@ const DELTA_CHIP = {
   MODIFIER: ['', 'modifier'], BODY: ['', 'body'],
 };
 
-const S = { prId: null, pr: null, files: null, selected: null, mode: 'overview', drafts: [] };
+const S = {
+  prId: null, pr: null, files: null, selected: null, mode: 'overview', drafts: [],
+  // null means "not loaded yet", which must render differently from an empty list.
+  threads: null, threadsError: null,
+  allPrs: [],
+};
 
 init().catch((e) => { $('#banners').innerHTML = banner('bad', 'Failed to load', esc(e.message)); });
 
@@ -44,6 +49,7 @@ async function init() {
       'Run <code>npm start -- &lt;pr-url&gt;</code> first.');
     return;
   }
+  S.allPrs = prs;
   const picker = $('#prPicker');
   picker.innerHTML = prs.map((p) => `<option value="${esc(p.id)}">${esc(p.id)} — ${esc(p.title ?? '')}</option>`).join('');
   picker.onchange = () => {
@@ -69,9 +75,13 @@ async function init() {
 async function selectPr(prId) {
   S.prId = prId;
   S.selected = null;
+  S.threads = null;
+  S.threadsError = null;
   S.pr = await api(`/api/pr/${encodeURIComponent(prId)}`);
   S.files = await api(`/api/pr/${encodeURIComponent(prId)}/files`);
   await loadDrafts();
+  // Existing threads come from a paginated GitHub call, so it must not hold up first paint.
+  loadThreads(prId);
   renderHead();
   renderBanners();
   renderFiles();
@@ -444,17 +454,33 @@ async function renderDetail(id) {
   }
 
   if (d.source) {
-    const anchorLine = d.source.after?.startLine ?? u?.symbol?.range?.start?.line + 1;
+    // The anchor's side must come from whichever revision supplied the line. A REMOVED member has
+    // no head line at all, so anchoring it takes the base line and LEFT — sending a base line as
+    // RIGHT mixes the two numbering spaces (A3) and costs the deleted code its inline anchor.
+    const anchor = d.source.after?.startLine
+      ? { line: d.source.after.startLine, side: 'head' }
+      : d.source.before?.startLine
+        ? { line: d.source.before.startLine, side: 'base' }
+        : u?.symbol?.range?.start?.line != null
+          ? { line: u.symbol.range.start.line + 1, side: u.changeKind === 'REMOVED' ? 'base' : 'head' }
+          : null;
+    const anchorLine = anchor?.line;
     const mine = anchorLine ? draftsFor(n.path, anchorLine) : [];
     out.push(`<h4>Diff
-      ${anchorLine ? `<span class="n"><button data-comment="chg">comment on this change</button></span>` : ''}
+      ${anchorLine ? `<span class="n"><button data-comment="chg">comment on this change${
+        anchor.side === 'base' ? ' (deleted code)' : ''}</button></span>` : ''}
+      ${u && S.allPrs.length > 1 ? '<span class="n"><button data-shared="1">…and on other PRs</button></span>' : ''}
       ${mine.length ? `<span class="draftMark">${mine.length} draft${mine.length === 1 ? '' : 's'}</span>` : ''}</h4>`);
+    if (u && S.allPrs.length > 1) out.push('<div id="sharedPanel" hidden></div>');
     if (anchorLine) {
       out.push(commentBox(n.path, anchorLine, 'chg').replace('<div class="cmtBox"',
-        `<div class="cmtBox" data-path="${esc(n.path)}" data-line="${anchorLine}" data-side="head"`));
+        `<div class="cmtBox" data-path="${esc(n.path)}" data-line="${anchorLine}" data-side="${anchor.side}"`));
     }
-    out.push(renderDiff(d.source.before, d.source.after));
+    out.push('<div class="hintSm" style="padding:0 0 4px">click any line number to comment on that line</div>');
+    out.push(renderDiff(d.source.before, d.source.after, n.path));
   }
+
+  out.push(threadsHtml(n, u));
 
   const kv = [];
   if (u?.symbol) {
@@ -485,6 +511,9 @@ async function renderDetail(id) {
 
   el.innerHTML = out.join('');
   wireCommentBoxes(el);
+  wireDiffLines(el);
+  wireThreads(el);
+  if (u) wireShared(el, u.id);
 }
 
 const fmt = (x) => (Array.isArray(x) ? (x.length ? x.join(' ') : '∅') : (x ?? '∅'));
@@ -527,18 +556,25 @@ function sigChangeHtml(sc) {
  * Unified line diff with collapsed context. Two raw panes of source, which is what v1 showed, made
  * the reader find the change themselves — the one job the tool exists to do for them.
  */
-function renderDiff(before, after) {
+function renderDiff(before, after, path) {
+  // A row is commentable only when we know both its line and which revision it came from.
+  const anchor = (line, side) => (path && line
+    ? ` data-cp="${esc(path)}" data-cl="${line}" data-cs="${side}" title="comment on ${side} line ${line}"` : '');
+  const mark = (line, side) => (path && draftsFor(path, line, side).length ? '<span class="lineDraft">●</span>' : '');
+  const row = (cls, line, side, text) =>
+    `<div class="${cls}"${anchor(line, side)}><span class="ln">${line}</span>${mark(line, side)}${text}</div>`;
+
   if (!before && !after) return '<div class="absent">no source</div>';
   if (before?.absent && after?.absent) return `<div class="absent">${esc(before.reason ?? 'absent')}</div>`;
   if (before?.absent) {
     return `<div class="absent">${esc(before.reason ?? 'did not exist before')}</div>
       <pre class="diff">${(after.text ?? '').split('\n').map((l, i) =>
-        `<div class="add"><span class="ln">${(after.startLine ?? 1) + i}</span>${esc(l)}</div>`).join('')}</pre>`;
+        row('add', (after.startLine ?? 1) + i, 'head', esc(l))).join('')}</pre>`;
   }
   if (after?.absent) {
     return `<div class="absent">${esc(after.reason ?? 'removed')}</div>
       <pre class="diff">${(before.text ?? '').split('\n').map((l, i) =>
-        `<div class="del"><span class="ln">${(before.startLine ?? 1) + i}</span>${esc(l)}</div>`).join('')}</pre>`;
+        row('del', (before.startLine ?? 1) + i, 'base', esc(l))).join('')}</pre>`;
   }
 
   const a = (before.text ?? '').split('\n');
@@ -561,7 +597,8 @@ function renderDiff(before, after) {
     const cls = op.t === '+' ? 'add' : op.t === '-' ? 'del' : 'ctx';
     const ln = op.t === '-' ? (before.startLine ?? 1) + op.ai : (after.startLine ?? 1) + op.bi;
     const sign = op.t === '=' ? ' ' : op.t;
-    rows.push(`<div class="${cls}"><span class="ln">${ln}</span>${sign} ${esc(op.line)}</div>`);
+    // A deleted line exists only at base; added and context lines are addressed at head.
+    rows.push(row(cls, ln, op.t === '-' ? 'base' : 'head', `${sign} ${esc(op.line)}`));
   });
   if (hidden) rows.push(`<div class="gap">    ⋯ ${hidden} unchanged line${hidden === 1 ? '' : 's'}</div>`);
   if (!ops.some((o) => o.t !== '=')) rows.push('<div class="gap">    identical — the change is elsewhere in the file</div>');
@@ -603,8 +640,12 @@ async function loadDrafts() {
   } catch { S.drafts = []; }
 }
 
-const draftsFor = (path, line) =>
-  S.drafts.filter((d) => !d.submittedAt && d.path === path && d.line === line);
+// Side matters: base line 40 and head line 40 of one file are different code, so a draft on one
+// must not be counted against the other. An omitted side matches either, for callers that have
+// only one anchor to offer.
+const draftsFor = (path, line, side) =>
+  S.drafts.filter((d) => !d.submittedAt && d.path === path && d.line === line
+    && (side === undefined || d.side === (side === 'base' ? 'LEFT' : 'RIGHT')));
 
 function commentBox(path, line, anchorId) {
   return `
@@ -628,34 +669,235 @@ function wireCommentBoxes(scope) {
       box?.querySelector('textarea')?.focus();
     };
   }
-  for (const box of scope.querySelectorAll('.cmtBox')) {
-    const [body, sugg] = box.querySelectorAll('textarea');
-    box.querySelector('[data-act=toggleSugg]').onclick = () => {
-      sugg.hidden = !sugg.hidden;
-      if (!sugg.hidden) sugg.focus();
+  for (const box of scope.querySelectorAll('.cmtBox')) wireBox(box);
+}
+
+/** One box's behaviour, split out so a box created on demand for a diff line reuses it verbatim. */
+function wireBox(box, { onCancel } = {}) {
+  const [body, sugg] = box.querySelectorAll('textarea');
+  box.querySelector('[data-act=toggleSugg]').onclick = () => {
+    sugg.hidden = !sugg.hidden;
+    if (!sugg.hidden) sugg.focus();
+  };
+  box.querySelector('[data-act=cancel]').onclick = () => {
+    if (onCancel) onCancel();
+    else box.hidden = true;
+  };
+  box.querySelector('[data-act=save]').onclick = async () => {
+    const payload = {
+      unitId: S.selected,
+      path: box.dataset.path,
+      line: Number(box.dataset.line),
+      side: box.dataset.side === 'base' ? 'LEFT' : 'RIGHT',
+      body: body.value.trim(),
+      suggestion: sugg.hidden ? undefined : sugg.value.trim() || undefined,
     };
-    box.querySelector('[data-act=cancel]').onclick = () => { box.hidden = true; };
-    box.querySelector('[data-act=save]').onclick = async () => {
-      const payload = {
-        unitId: S.selected,
-        path: box.dataset.path,
-        line: Number(box.dataset.line),
-        side: box.dataset.side === 'base' ? 'LEFT' : 'RIGHT',
-        body: body.value.trim(),
-        suggestion: sugg.hidden ? undefined : sugg.value.trim() || undefined,
-      };
-      if (!payload.body && !payload.suggestion) { body.focus(); return; }
-      const r = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/drafts`, {
+    if (!payload.body && !payload.suggestion) { body.focus(); return; }
+    const r = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/drafts`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then((x) => x.json());
+    if (r.error) { alert(r.error); return; }
+    await loadDrafts();
+    // A pr-level fallback is worth stating: the reviewer should know GitHub cannot anchor it.
+    if (r.scope === 'pr') {
+      alert(`Saved as a pull-request level comment.\n\n${r.reason}\n\nIt will appear in the review body with its location.`);
+    }
+    renderDetail(S.selected);
+  };
+}
+
+/**
+ * Task 3 — comment on any line of the diff, not just the symbol's first line. Every row carries
+ * the line AND the revision it belongs to (a `-` row is base, a `+` or context row is head), so
+ * the anchor's side is read off the row rather than assumed.
+ */
+function wireDiffLines(scope) {
+  for (const row of scope.querySelectorAll('.diff > [data-cl]')) {
+    row.querySelector('.ln').onclick = () => {
+      const existing = row.nextElementSibling;
+      if (existing?.classList.contains('lineBox')) { existing.remove(); return; }
+      const path = row.dataset.cp;
+      const line = Number(row.dataset.cl);
+      const side = row.dataset.cs;
+      const holder = document.createElement('div');
+      holder.className = 'lineBox';
+      holder.innerHTML = commentBox(path, line, `l${side}${line}`)
+        .replace('<div class="cmtBox"', `<div class="cmtBox" data-path="${esc(path)}" data-line="${line}" data-side="${side}"`)
+        .replace(' hidden>', '>');
+      row.after(holder);
+      wireBox(holder.querySelector('.cmtBox'), { onCancel: () => holder.remove() });
+      holder.querySelector('textarea').focus();
+    };
+  }
+}
+
+// ------------------------------------------------------------------ shared findings (9.7)
+// One body, several PRs, each anchored to its own location. A PR that does not change this symbol
+// is listed as skipped with the reason — inventing an anchor there would be worse than omitting it.
+
+function wireShared(scope, unitId) {
+  const btn = scope.querySelector('[data-shared]');
+  if (!btn) return;
+  const panel = scope.querySelector('#sharedPanel');
+  btn.onclick = async () => {
+    if (!panel.hidden) { panel.hidden = true; return; }
+    panel.hidden = false;
+    panel.innerHTML = '<div class="absent">looking for this symbol in the other PRs…</div>';
+    let t;
+    try {
+      t = await api(`/api/shared/targets?prId=${encodeURIComponent(S.prId)}&unitId=${encodeURIComponent(unitId)}`);
+    } catch (e) { panel.innerHTML = `<div class="unknownBox">${esc(e.message)}</div>`; return; }
+
+    const rows = t.targets.map((x) => `
+      <label class="shTarget">
+        <input type="checkbox" checked data-t='${esc(JSON.stringify(x))}'>
+        <span class="shPr">${esc(x.prId)}</span>
+        <span class="loc">${esc(x.path.split('/').pop())}:${x.line}${x.side === 'LEFT' ? ' (base side)' : ''}</span>
+        <span class="ck ${esc(x.changeKind)}">${esc(x.changeKind[0])}</span>
+      </label>`).join('');
+    const skips = t.skipped.map((s) =>
+      `<div class="shSkip">${esc(s.prId)} — ${esc(s.reason)}</div>`).join('');
+
+    panel.innerHTML = `
+      <div class="sharedBox">
+        <div class="shHd">Apply one comment to <code>${esc(t.fqn.split('#').pop())}</code> in other PRs</div>
+        ${t.targets.length ? rows
+          : '<div class="absent">No other analysed PR changes this symbol.</div>'}
+        ${skips ? `<div class="shSkips"><b>not applicable</b>${skips}</div>` : ''}
+        ${t.targets.length ? `
+          <textarea placeholder="one body, posted to each PR above at its own location…"></textarea>
+          <div class="row">
+            <span class="hintSm">each PR gets its own draft and its own anchor — still nothing is sent until you submit that PR's review</span>
+            <button data-act="shSave" class="go">save to selected PRs</button>
+          </div>` : ''}
+        <div class="shResult" hidden></div>
+      </div>`;
+
+    const save = panel.querySelector('[data-act=shSave]');
+    if (!save) return;
+    save.onclick = async () => {
+      const ta = panel.querySelector('textarea');
+      const body = ta.value.trim();
+      if (!body) { ta.focus(); return; }
+      const targets = [...panel.querySelectorAll('input[type=checkbox]:checked')]
+        .map((c) => JSON.parse(c.dataset.t));
+      if (!targets.length) return;
+      const r = await fetch('/api/shared/drafts', {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ body, targets }),
       }).then((x) => x.json());
-      if (r.error) { alert(r.error); return; }
+      const out = panel.querySelector('.shResult');
+      out.hidden = false;
+      if (r.error) { out.innerHTML = `<div class="unknownBox">${esc(r.error)}</div>`; return; }
+      // Per-PR outcomes, never a single averaged "saved". One PR anchoring inline while another
+      // falls back to pr-level is normal, and the reviewer has to be able to see which is which.
+      out.innerHTML = `<div class="shOut"><b>${r.created} saved${r.failed ? `, ${r.failed} refused` : ''}</b>${
+        r.results.map((x) => `<div class="shRow">
+          <span class="shPr">${esc(x.prId)}</span>
+          ${x.ok ? `<span class="scopeTag ${x.scope}">${x.scope === 'pr' ? 'PR-LEVEL' : 'INLINE'}</span>`
+            : '<span class="scopeTag refused">REFUSED</span>'}
+          <span class="sm">${esc(x.ok ? (x.reason ?? `${x.path.split('/').pop()}:${x.line}`) : x.error)}</span>
+        </div>`).join('')}</div>`;
+      ta.value = '';
       await loadDrafts();
-      // A pr-level fallback is worth stating: the reviewer should know GitHub cannot anchor it.
-      if (r.scope === 'pr') {
-        alert(`Saved as a pull-request level comment.\n\n${r.reason}\n\nIt will appear in the review body with its location.`);
-      }
-      renderDetail(S.selected);
+      renderDrawer();
+    };
+  };
+}
+
+// ------------------------------------------------------------------ existing threads (9.11)
+// These are comments already on GitHub. Unlike a draft, a reply here is NOT local — it posts as
+// soon as it is confirmed, so the UI says so rather than implying the drawer will hold it.
+
+async function loadThreads(prId) {
+  try {
+    const r = await api(`/api/pr/${encodeURIComponent(prId)}/threads`);
+    if (S.prId !== prId) return;             // the reviewer moved on while we were fetching
+    S.threads = r.threads ?? [];
+    S.threadsError = r.error ?? null;
+  } catch (e) {
+    if (S.prId !== prId) return;
+    S.threads = [];
+    S.threadsError = e.message;
+  }
+  if (S.selected) renderDetail(S.selected);
+}
+
+/** Threads on this symbol: same file, and within the symbol's own line range when we know it. */
+function threadsForNode(n, u) {
+  if (!S.threads || !n.path) return { list: [], scoped: false };
+  const same = S.threads.filter((t) => t.path === n.path);
+  const r = u?.symbol?.range;
+  if (!r) return { list: same, scoped: false };
+  const lo = r.start.line + 1;
+  const hi = r.end.line + 1;
+  return { list: same.filter((t) => t.line >= lo && t.line <= hi), scoped: true };
+}
+
+function threadsHtml(n, u) {
+  if (S.threads === null) {
+    return '<h4>Conversation</h4><div class="absent">loading existing comments from GitHub…</div>';
+  }
+  if (S.threadsError) {
+    return `<h4>Conversation</h4><div class="unknownBox"><b>could not load existing comments</b> — ${esc(S.threadsError)}
+      <span class="sm">This is not the same as there being none.</span></div>`;
+  }
+  const { list, scoped } = threadsForNode(n, u);
+  if (!list.length) return '';
+  const out = [`<h4>Conversation <span class="n">${list.length} thread${list.length === 1 ? '' : 's'}${
+    scoped ? ' on this symbol' : ' in this file'}</span></h4>`];
+  for (const t of list) {
+    out.push(`<div class="thread" data-root="${t.rootId}">
+      <div class="thHd">
+        <span class="loc">${esc(t.path.split('/').pop())}:${t.line ?? '?'}</span>
+        <div class="spacer"></div>
+        ${t.comments[0]?.url ? `<a href="${esc(t.comments[0].url)}" target="_blank" rel="noreferrer">on GitHub ↗</a>` : ''}
+      </div>
+      ${t.comments.map((c) => `<div class="thCmt">
+        <div class="thWho"><b>${esc(c.author ?? 'unknown')}</b>
+          <span class="sm">${esc(String(c.createdAt ?? '').slice(0, 10))}</span></div>
+        <div class="thBody">${esc(c.body)}</div>
+      </div>`).join('')}
+      <div class="thReply">
+        <textarea placeholder="reply to ${esc(t.comments[0]?.author ?? 'this thread')}…"></textarea>
+        <div class="row">
+          <span class="hintSm">a reply is posted to GitHub on confirm — it is not held as a draft</span>
+          <button data-act="reply">reply…</button>
+        </div>
+        <div class="thConfirm" hidden></div>
+      </div>
+    </div>`);
+  }
+  return out.join('');
+}
+
+function wireThreads(scope) {
+  for (const th of scope.querySelectorAll('.thread')) {
+    const rootId = Number(th.dataset.root);
+    const ta = th.querySelector('.thReply textarea');
+    const confirm = th.querySelector('.thConfirm');
+    th.querySelector('[data-act=reply]').onclick = () => {
+      const body = ta.value.trim();
+      if (!body) { ta.focus(); return; }
+      // Same discipline as a review submit: show the exact payload, then require an explicit yes.
+      confirm.hidden = false;
+      confirm.innerHTML = `<div class="confirmBar">
+        <b>POST</b> /pulls/${S.pr.pr.number}/comments/${rootId}/replies
+        <pre class="payload">${esc(JSON.stringify({ body }, null, 2))}</pre>
+        <div class="row"><button data-act="go" class="go">confirm & post</button>
+          <button data-act="no">cancel</button></div></div>`;
+      confirm.querySelector('[data-act=no]').onclick = () => { confirm.hidden = true; confirm.innerHTML = ''; };
+      confirm.querySelector('[data-act=go]').onclick = async () => {
+        const r = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/threads/reply`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ rootId, body, confirmed: true }),
+        }).then((x) => x.json());
+        if (!r.sent) { confirm.innerHTML = `<div class="confirmBar bad"><b>not sent</b> — ${esc(r.reason ?? r.error ?? 'unknown')}</div>`; return; }
+        confirm.innerHTML = `<div class="confirmBar"><b>posted</b> ${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noreferrer">view ↗</a>` : ''}</div>`;
+        ta.value = '';
+        await loadThreads(S.prId);
+      };
     };
   }
 }
@@ -676,6 +918,7 @@ function renderDrawer(extra = '') {
       <div class="draftRow ${d.scope === 'pr' ? 'prLevel' : ''}">
         <div class="loc">
           <span class="scopeTag ${d.scope}">${d.scope === 'pr' ? 'PR-LEVEL' : 'INLINE'}</span>
+          ${d.groupId ? '<span class="scopeTag shared" title="one finding, also drafted on other PRs">SHARED</span>' : ''}
           ${esc(d.path)}${d.line ? `:${d.line}` : ''}${d.side === 'LEFT' ? ' (base side)' : ''}
         </div>
         <div class="bd">${esc(d.body)}</div>

@@ -645,3 +645,101 @@ A missing flag therefore cannot post by accident. Live check against the real PR
 - a moved head blocks submission and retains the drafts
 - a rejected submit retains every draft, and a second submit posts nothing because nothing is pending
 - replies to existing threads follow the same confirmation discipline
+
+## Three write-path bugs that only using the tool exposed
+
+The write path passed 23 tests and was reported complete. Driving it against
+`sedai-simulation-server#244` by hand found three defects in an hour. All three sat in the gap the
+suite does not cover: the tests assert the *server's* contract, and every one of these lived in the
+browser or in the task list.
+
+### Finding F18 — `hidden` loses to an id selector, so the review drawer would not close
+
+`#drawer { display: grid }` beats the user-agent `[hidden] { display: none }` rule on specificity.
+The close handler ran, the attribute landed, and the modal stayed on screen — a dead button with
+correct JavaScript behind it. Because the drawer is a full-viewport overlay, it also swallowed every
+click underneath, so unrelated write actions looked broken too.
+
+Fixed at the reset with `[hidden] { display: none !important }` rather than by patching `#drawer`,
+because the next panel given an id `display` rule would have reintroduced it. `hidden` is only ever
+as strong as the weakest rule that beats `display: none`.
+
+### Finding F19 (correctness) — F13 recurred, in the UI this time
+
+F13 established that base-side and head-side line numbers are not interchangeable. The change-level
+comment button violated it anyway: it hardcoded `data-side="head"` while deriving its line from
+`d.source.after?.startLine ?? symbol.range.start.line + 1`. For a REMOVED member `source.after` is
+`{}` — truthy, so the guard passed, `.startLine` was `undefined`, and the fallback produced a **base**
+line submitted as `RIGHT`.
+
+Measured on the REMOVED unit `SessionServiceTest#createSession_ReuseSessionResetCore…`, base line 198:
+
+| side sent | result |
+|---|---|
+| `RIGHT` (the bug) | `scope: "pr"` — *"line 198 … is not in the diff"* |
+| `LEFT` (fixed) | `scope: "inline"` |
+
+`anchorable()` was already correct; it was being handed the wrong side. The failure mode is the
+quiet kind — no error, no 422, just a deleted method that silently cannot be commented on inline,
+and REMOVED members are exactly what break analysis cares most about. The anchor's side is now read
+off the diff row that produced it, which is also what made per-line commenting correct for free.
+
+**The lesson F13 did not teach hard enough:** a truthy-but-empty object defeats `??`. The invariant
+needs the presence of the *field*, not of its container.
+
+### Finding F20 (process) — a task was marked done from one end of the wire
+
+Task 9.11 was checked complete. `fetchThreads` and `replyToThread` existed, were routed, and were
+tested. But `grep -c thread src/server/public/app.js` returned **0** — the UI never called either
+endpoint. Existing GitHub comments were fetched by a working API and displayed nowhere.
+
+A task spanning server and UI cannot be closed by the server half passing its tests. The write
+suite's 23 cases all still passed with the feature entirely unreachable, because they test the
+contract, not the reachability of the contract.
+
+Now built: threads matched to the selected symbol's line range, replies behind the same
+confirm-the-exact-payload discipline as a submit, and three distinct states — loading, failed, and
+empty. A failed fetch renders as a failure and not as an empty list; conflating the two would be the
+same class of lie as showing a bounded analysis as a complete one.
+
+## Shared findings across PRs (9.7)
+
+The last write-path task, and the one where F6 finally pays off: the review unit is cross-repo, so a
+finding usually is too. One body, several PRs.
+
+**A target is a PR that changes the same symbol — nothing looser.** Matching is by FQN against each
+PR's own change units. A PR that does not touch that symbol is *not* a target: there is no location
+to anchor to, and choosing one would mean inventing it. Such PRs come back as `skipped` with a
+reason and are shown as **not applicable**, because silently returning four targets when five PRs
+were considered is the same omission the truncation disclosures exist to prevent.
+
+**Every PR resolves its own anchor.** A line number is meaningful only inside its own repository, so
+each target carries its own path, line, side and head SHA, and each runs `anchorable()` against its
+own checkout. One PR anchoring inline while another falls back to pr-level is the normal case and is
+reported per PR — never collapsed into one "saved". The test fixture pads the second repository so
+the shared symbol sits at a *different* line number than in the first; reusing the source PR's line
+would fail loudly rather than coincidentally pass.
+
+Sides follow F19 here too: a symbol that is REMOVED in the target PR is anchored `LEFT`.
+
+**Grouping is bookkeeping, not merging.** Siblings share a `group_id` so the finding can be edited or
+withdrawn everywhere at once, but submission is unchanged — one review per PR, each pinned to its own
+head SHA. A partial create is kept rather than rolled back: the drafts that did resolve are worth
+having, and nothing has reached GitHub yet.
+
+### Finding F21 — a hand-maintained schema version drifts, and the drift is silent until it isn't
+
+Adding migration v4 broke every test that opened a database twice: `duplicate column name: group_id`.
+`SCHEMA_VERSION` was a literal `3` beside a four-element `MIGRATIONS` array. `openDb` migrates from
+the *stored* version but then writes the *constant*, so the stored version stopped advancing and
+every subsequent open re-ran the final migration.
+
+The bug is not the stale number, it is that the number existed at all — two sources of truth for one
+fact. `SCHEMA_VERSION` is now `MIGRATIONS.length`, so adding a migration is one edit and cannot
+drift. Verified against the real `.cache/cspider.db`: it advanced 3 → 4, gained `group_id`, and kept
+its existing rows.
+
+Worth noting how it surfaced. The existing suite never caught it because no test opened a migrated
+database a second time; the new cross-PR tests do, because two PRs in one store means opening it
+again. This is the F20 lesson recurring from the other side — the gap was in what the tests *set up*,
+not in what they asserted.
