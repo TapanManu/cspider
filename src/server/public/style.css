@@ -15,12 +15,19 @@
   --unknown: #e0a02b;
   --accent: #7aa2f7;
   --lane: #1b2029;
+  /* Declared here, before the light-theme block, so that block's override actually wins — two
+     `:root` rules have equal specificity and the later one takes it. */
+  --brand: var(--accent);
 }
 
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #f6f7f9; --panel: #fff; --panel-2: #f0f2f6; --panel-3: #e7eaf0;
     --line: #dbe0e8; --fg: #171c24; --dim: #5b6675; --faint: #8b95a6; --lane: #eef1f6;
+    /* The dark-theme accent is a pale blue tuned for a #0e1014 background; on white it drops to
+       about 2.6:1 and the mark washes out. The brand gets a darker blue rather than restyling
+       every accented control. */
+    --brand: #3163cf;
   }
 }
 
@@ -41,7 +48,14 @@ header {
   display: flex; align-items: center; gap: 12px; padding: 7px 12px;
   border-bottom: 1px solid var(--line); background: var(--panel); flex: none;
 }
-.brand { font-weight: 700; letter-spacing: .3px; color: var(--accent); }
+.brand { display: flex; align-items: center; gap: 8px; flex: none; user-select: none; }
+.brand .mark { color: var(--brand); flex: none; display: block; }
+.brand .wm {
+  font-weight: 700; font-size: 14px; letter-spacing: -.1px; color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+/* The leading `c` carries the accent, so the wordmark and the mark read as one object. */
+.brand .wm b { color: var(--brand); font-weight: 800; }
 .spacer { flex: 1; }
 .counts, .progress { color: var(--dim); font-size: 12px; white-space: nowrap; }
 .counts b { color: var(--fg); }

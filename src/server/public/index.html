@@ -4,11 +4,33 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>cspider</title>
+  <!-- Same mark, inline so there is no asset to fetch or lose. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D'http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg'%20viewBox%3D'0%200%2024%2024'%3E%3Cg%20stroke%3D'%237aa2f7'%20stroke-width%3D'1.5'%20fill%3D'none'%20stroke-linejoin%3D'round'%3E%3Cpolygon%20points%3D'22%2C12%2017%2C3.34%207%2C3.34%202%2C12%207%2C20.66%2017%2C20.66'%2F%3E%3Cpath%20d%3D'M12%2012H22M12%2012%2017%203.34M12%2012%207%203.34M12%2012H2M12%2012%207%2020.66M12%2012%2017%2020.66'%2F%3E%3C%2Fg%3E%3Ccircle%20cx%3D'12'%20cy%3D'12'%20r%3D'3.6'%20fill%3D'%237aa2f7'%2F%3E%3C%2Fsvg%3E">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
-    <div class="brand">cspider</div>
+    <!-- The mark is the tool's own subject: a centre node with its edges radiating to the symbols
+         around it, and the ring that closes them into a web. It is the Impact view, drawn small.
+         Inline and monochrome via currentColor, so it inherits the theme and needs no asset. -->
+    <div class="brand" title="cspider — PR semantic change reader">
+      <svg class="mark" viewBox="0 0 24 24" width="21" height="21" aria-hidden="true" focusable="false">
+        <g fill="none" stroke="currentColor" stroke-linejoin="round" stroke-linecap="round">
+          <polygon points="22,12 17,3.34 7,3.34 2,12 7,20.66 17,20.66" stroke-width="1" opacity=".34"/>
+          <polygon points="17.6,12 14.8,7.15 9.2,7.15 6.4,12 9.2,16.85 14.8,16.85" stroke-width="1" opacity=".5"/>
+          <g stroke-width="1" opacity=".55">
+            <path d="M15.4 12H22M13.7 9.06 17 3.34M10.3 9.06 7 3.34M8.6 12H2M10.3 14.94 7 20.66M13.7 14.94 17 20.66"/>
+          </g>
+        </g>
+        <g fill="currentColor" opacity=".78">
+          <circle cx="22" cy="12" r="1.45"/><circle cx="17" cy="3.34" r="1.45"/>
+          <circle cx="7" cy="3.34" r="1.45"/><circle cx="2" cy="12" r="1.45"/>
+          <circle cx="7" cy="20.66" r="1.45"/><circle cx="17" cy="20.66" r="1.45"/>
+        </g>
+        <circle cx="12" cy="12" r="3" fill="currentColor"/>
+      </svg>
+      <span class="wm"><b>c</b>spider</span>
+    </div>
     <select id="prPicker" aria-label="pull request"></select>
     <div class="spacer"></div>
     <div id="counts" class="counts"></div>
