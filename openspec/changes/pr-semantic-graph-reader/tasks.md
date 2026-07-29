@@ -118,7 +118,10 @@
 - [x] 8.7 Implement the facts panel: deltas, test coverage, risk components, PR ids, and unresolved references
 - [x] 8.8 Implement the graph view with visual encoding of change kind, origin, risk, reviewed state, PR color, and truncation counts
 - [x] 8.9 Implement the ordered-list view with reviewed marking and progress count
-- [ ] 8.10 Implement the file-tree view with per-file blocks
+- [x] 8.10 Implement the file-tree view with per-file blocks — nested folders with single-child chains collapsed, each file carrying its changed methods
+- [x] 8.10c Light the full trail to the selection — method, file and ancestor folders — and state in a crumb when a selected CONTEXT node has no row because the PR does not change its file
+- [x] 8.10b Colour context nodes by break verdict and draw each node in exactly one lane, carrying the verdict across and keeping orphan-site matching over all callers (F23)
+- [x] 8.10a Review checkboxes at method, file and folder level, propagating upward with a real partial state, reflected on the graph node, and rendering a stale mark as its own state rather than as a tick (F22)
 - [x] 8.11 Implement shared selection state and synchronization across all three views
 - [x] 8.12 Implement edge-type filtering with visual distinction for CO_CHANGED and other non-resolved edges
 - [x] 8.13 Implement the resolution-health indicator, the degraded-graph banner, the unavailable-edge-type notice, and the cross-PR overlap banner

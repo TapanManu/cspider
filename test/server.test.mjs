@@ -20,7 +20,7 @@ const P = 'src/main/java/com/acme/Svc.java';
 const wrap = (b) => `package com.acme;\n\npublic class Svc {\n${b}\n}\n`;
 const PRID = 'acme/svc#1';
 
-function seed(db, { truncated = [], health = null, resolved = true } = {}) {
+function seed(db, { truncated = [], health = null, resolved = true, lanes = false } = {}) {
   const base = new Map([[P, parseSymbols(wrap('public void f(String s) { g(1); }'), P)]]);
   const head = new Map([[P, parseSymbols(wrap('public void f(String s, int n) { g(1); }'), P)]]);
   const { units } = diffSymbols('acme/svc', base, head);
@@ -32,7 +32,12 @@ function seed(db, { truncated = [], health = null, resolved = true } = {}) {
     changeKind: u.changeKind, severity: u.severity,
     risk: u.id === m.id ? { total: 45, components: [{ name: 'broken-call-sites', points: 30 }] } : null,
     fanIn: u.id === m.id ? { count: 1, kind: 'DIRECT', note: null } : null,
-    callers: u.id === m.id ? [{ path: 'A.java', line: 9, side: 'head', inDiff: false }] : null,
+    callers: u.id === m.id
+      ? [{ path: 'A.java', line: 9, side: 'head', inDiff: false },
+        // The test's own call site, so orphanSites has something that WOULD be reported orphaned
+        // if it were matched against the production callers alone.
+        ...(lanes ? [{ path: 'SvcTest.java', line: 7, side: 'head', inDiff: false }] : [])]
+      : null,
     testCovered: false,
     break: u.id === m.id
       ? { verdicts: { BROKEN: 1, UPDATED: 0, SAFE: 0 },
@@ -41,6 +46,20 @@ function seed(db, { truncated = [], health = null, resolved = true } = {}) {
       : null,
     unknown: null,
   }]));
+  // Context nodes for the lane test: unchanged code, so neither carries a change kind of its own.
+  if (lanes) {
+    for (const [id, fqn, path] of [
+      ['ctx:prod', 'com.acme.Caller#call()', 'src/main/java/com/acme/Caller.java'],
+      ['ctx:test', 'com.acme.SvcTest#covers()', 'src/test/java/com/acme/SvcTest.java'],
+    ]) {
+      nodes.set(id, {
+        id, fqn, kind: 'METHOD', path, origin: 'CONTEXT', changeKind: 'UNCHANGED',
+        severity: null, risk: null, fanIn: null, callers: null, testCovered: false,
+        break: null, unknown: null,
+      });
+    }
+  }
+
   const analysis = {
     pr: { nwo: 'acme/svc', number: 1, repo: 'svc' },
     meta: { headRefOid: 'h1', title: 'T', url: 'u' },
@@ -49,7 +68,17 @@ function seed(db, { truncated = [], health = null, resolved = true } = {}) {
     graph: resolved ? {
       nodes,
       edges: [{ type: 'CALLS', from: 'ctx:x', to: m.id, derivedFrom: 'LSP', verdict: 'BROKEN',
-        evidence: [{ path: 'A.java', line: 9 }] }],
+        evidence: [{ path: 'A.java', line: 9 }] },
+      // A test that calls the changed member: it produces BOTH edge types from ONE node, which is
+      // the case that used to draw it in two lanes and count it as production reach.
+      ...(lanes ? [
+        { type: 'CALLS', from: 'ctx:prod', to: m.id, derivedFrom: 'LSP', verdict: 'BROKEN',
+          evidence: [{ path: 'Prod.java', line: 4 }] },
+        { type: 'CALLS', from: 'ctx:test', to: m.id, derivedFrom: 'LSP', verdict: 'SAFE',
+          evidence: [{ path: 'SvcTest.java', line: 7 }] },
+        { type: 'TEST_COVERS', from: 'ctx:test', to: m.id, derivedFrom: 'LSP',
+          evidence: [{ path: 'SvcTest.java', line: 7 }] },
+      ] : [])],
       blastRadius: { depth: 2, reachedDepth: 1, added: 1, maxNodes: 400, truncated, budgetLeft: 0 },
       truncations: truncated,
     } : null,
@@ -134,6 +163,42 @@ await t('the ego endpoint returns callers, callees and tests around one node', a
   assert.equal(typeof body.counts.callers, 'number');
 });
 
+// A test that calls the changed member emits both a CALLS and a TEST_COVERS edge. Drawn from both,
+// it appeared in two lanes and inflated the caller count into "production reach" it is not.
+await t('a test that also calls the member appears once, in the TESTS lane', async () => {
+  const { server, seeded } = boot({ lanes: true });
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/ego?id=${encodeURIComponent(seeded.method.id)}`);
+  const ids = (a) => a.map((x) => x.id);
+  assert.deepEqual(ids(body.tests), ['ctx:test']);
+  assert.ok(!ids(body.callers).includes('ctx:test'), 'a test must not also be drawn as a caller');
+  assert.deepEqual(ids(body.callers), ['ctx:prod'], 'callers is production reach only');
+  assert.equal(body.counts.callers, 1);
+  assert.equal(body.counts.tests, 1);
+  assert.equal(body.counts.testCallers, 1, 'the overlap is stated, not hidden');
+});
+
+await t('a test keeps the verdict from its CALLS edge', async () => {
+  const { server, seeded } = boot({ lanes: true });
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/ego?id=${encodeURIComponent(seeded.method.id)}`);
+  // Without carrying it across, the node would lose its verdict on the way to the TESTS lane and
+  // render grey — indistinguishable from "we do not know".
+  assert.equal(body.tests[0].verdict, 'SAFE');
+  assert.equal(body.tests[0].alsoCalls, true);
+  assert.equal(body.callers[0].verdict, 'BROKEN');
+});
+
+await t('routing tests out of callers does not orphan their call sites', async () => {
+  const { server, seeded } = boot({ lanes: true });
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/ego?id=${encodeURIComponent(seeded.method.id)}`);
+  // orphanSites is matched against EVERY caller, tests included. Matching only the production
+  // callers would report the test's own call site as belonging to no member at all.
+  assert.ok(!body.orphanSites.some((s) => s.path === 'SvcTest.java'),
+    'a test call site is not orphaned by being routed to the TESTS lane');
+  // And the assertion is not vacuous: an unmatched site IS still reported.
+  assert.ok(body.orphanSites.some((s) => s.path === 'A.java'),
+    'a call site with no resolved caller node is still surfaced');
+});
+
 await t('files endpoint groups changes by file with per-kind counts', async () => {
   const { server } = boot();
   const { body } = await call(server, 'GET', `/api/pr/${ENC}/files`);
@@ -205,6 +270,45 @@ await t('marking an unknown unit is a 404', async () => {
   const { server } = boot();
   const { status } = await call(server, 'POST', `/api/pr/${ENC}/reviewed`, { unitId: 'nope' });
   assert.equal(status, 404);
+});
+
+// A file or folder checkbox marks every unit beneath it, which has to be one request: N requests
+// would each return a progress figure that was already stale by the time it arrived.
+await t('unitIds marks a whole batch in one call', async () => {
+  const { server, seeded } = boot();
+  const ids = seeded.units.map((u) => u.id);
+  const { body } = await call(server, 'POST', `/api/pr/${ENC}/reviewed`, { unitIds: ids, reviewed: true });
+  assert.equal(body.ok, true);
+  assert.equal(body.changed, ids.length);
+  assert.equal(body.progress.done, body.progress.total, 'marking every unit completes the PR');
+});
+
+await t('a batch is atomic — one bad id marks nothing', async () => {
+  const b = boot();
+  const good = b.seeded.method.id;
+  const { status } = await call(b.server, 'POST', `/api/pr/${ENC}/reviewed`,
+    { unitIds: [good, 'nope'], reviewed: true });
+  assert.equal(status, 404);
+  // A half-applied sweep would leave the reviewer unable to tell what they had marked.
+  const after = { server: createApiServer({ cacheDir: '/tmp', dbPath: b.db.name }).server };
+  const { body } = await call(after.server, 'GET', `/api/pr/${ENC}`);
+  assert.equal(body.progress.done, 0, 'the valid id in the batch must not have been marked');
+});
+
+await t('a batch unmarks as well as marks', async () => {
+  const b = boot();
+  const ids = b.seeded.units.map((u) => u.id);
+  await call(b.server, 'POST', `/api/pr/${ENC}/reviewed`, { unitIds: ids, reviewed: true });
+  const s2 = { server: createApiServer({ cacheDir: '/tmp', dbPath: b.db.name }).server };
+  const { body } = await call(s2.server, 'POST', `/api/pr/${ENC}/reviewed`, { unitIds: ids, reviewed: false });
+  assert.equal(body.progress.done, 0);
+});
+
+await t('a request naming no unit at all is a 400, not a silent no-op', async () => {
+  const { server } = boot();
+  const { status, body } = await call(server, 'POST', `/api/pr/${ENC}/reviewed`, { reviewed: true });
+  assert.equal(status, 400);
+  assert.match(body.error, /unitId/);
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

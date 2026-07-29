@@ -199,24 +199,45 @@ export function createApiServer({ cacheDir, dbPath, gh }) {
           callees.push({ ...brief(graph.nodes.get(e.to), 'callee'), via: e.evidence?.[0] ?? null });
         }
       }
+      // A test that calls the changed member produces BOTH a CALLS and a TEST_COVERS edge. Drawn
+      // naively it appears in two lanes, and `callers` then counts the test suite as production
+      // reach — 12 callers where only 2 are non-test. A test belongs in the TESTS lane, once.
+      // Its verdict comes from the CALLS edge, so it is carried across rather than lost.
+      const callerById = new Map(callers.map((c) => [c.id, c]));
       const tests = graph.edges
         .filter((e) => e.type === 'TEST_COVERS' && e.to === centre.id && e.from && graph.nodes.has(e.from))
-        .map((e) => ({ ...brief(graph.nodes.get(e.from), 'test'), via: e.evidence?.[0] ?? null }));
+        .map((e) => {
+          const asCaller = callerById.get(e.from);
+          return {
+            ...brief(graph.nodes.get(e.from), 'test'),
+            via: e.evidence?.[0] ?? asCaller?.via ?? null,
+            verdict: asCaller?.verdict ?? null,
+            alsoCalls: !!asCaller,
+          };
+        });
+      const testIds = new Set(tests.map((t) => t.id));
+      const prodCallers = callers.filter((c) => !testIds.has(c.id));
 
       // Call sites with no enclosing member still exist and must be visible, just not as nodes.
+      // Matched against every caller, tests included — a site is not orphaned just because its
+      // caller was routed to the TESTS lane.
       const orphanSites = (centre.callers ?? []).filter((c) =>
         !callers.some((k) => k.via?.path === c.path && k.via?.line === c.line));
 
+      const outCallers = dedupeById(prodCallers);
+      const outTests = dedupeById(tests);
       return {
         centre: brief(centre, 'centre'),
-        callers: dedupeById(callers),
+        callers: outCallers,
         callees: dedupeById(callees),
-        tests: dedupeById(tests),
+        tests: outTests,
         orphanSites,
         counts: {
-          callers: dedupeById(callers).length,
+          callers: outCallers.length,
           callees: dedupeById(callees).length,
-          tests: dedupeById(tests).length,
+          tests: outTests.length,
+          // Stated separately so "2 callers" is never mistaken for the whole inbound picture.
+          testCallers: outTests.filter((t) => t.alsoCalls).length,
           orphanSites: orphanSites.length,
           resolvedCallers: centre.fanIn?.count ?? null,
           fanInKind: centre.fanIn?.kind ?? null,
@@ -529,12 +550,26 @@ export function createApiServer({ cacheDir, dbPath, gh }) {
       const data = loadPr(params.prId);
       if (!data) return { __status: 404, error: 'unknown PR' };
       const body = await readBody(req);
-      const unit = data.units.find((u) => u.id === body.unitId);
-      if (!unit) return { __status: 404, error: 'unknown unit' };
-      if (body.reviewed === false) unmarkReviewed(db, params.prId, unit.id);
-      else markReviewed(db, params.prId, unit, body.note ?? null);
+      // A file or folder holds many units, and marking them one request at a time is both slow and
+      // racy — the progress figure returned by each would already be stale. One call, one answer.
+      const ids = Array.isArray(body.unitIds) ? body.unitIds
+        : (body.unitId ? [body.unitId] : []);
+      if (!ids.length) return { __status: 400, error: 'unitId or unitIds required' };
+
+      const units = ids.map((id) => data.units.find((u) => u.id === id));
+      const missing = ids.filter((id, i) => !units[i]);
+      if (missing.length) return { __status: 404, error: `unknown unit(s): ${missing.join(', ')}` };
+
+      // Atomic: a half-applied sweep would leave the reviewer unable to tell what they had marked.
+      db.transaction(() => {
+        for (const unit of units) {
+          if (body.reviewed === false) unmarkReviewed(db, params.prId, unit.id);
+          else markReviewed(db, params.prId, unit, body.note ?? null);
+        }
+      })();
+
       const reviewed = loadReviewed(db, params.prId, data.units);
-      return { ok: true, progress: progress(data.units, reviewed) };
+      return { ok: true, changed: units.length, progress: progress(data.units, reviewed) };
     },
   };
 

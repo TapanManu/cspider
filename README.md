@@ -86,21 +86,55 @@ npm run serve            # http://127.0.0.1:4173
 
 Three panes, in the order a review actually happens:
 
-**1. Files** — changes grouped by file, each row showing what *kind* of change it is as chips
-(`signature`, `visibility`, `annotation`, `throws`, `body`), its caller count, a risk bar, and a
-broken badge. You can see whether a signature moved without clicking anything.
+**1. Files** — a **directory tree**: folders nest, each file carries its own changed methods, and
+runs of single-child directories collapse into one row (`main/java/org/sedai`) so the nesting shows
+structure instead of consuming the pane. Method names are coloured by change kind, and each row
+shows what *kind* of change it is as chips (`signature`, `visibility`, `annotation`, `throws`,
+`body`), its caller count, a risk bar, and a broken badge. You can see whether a signature moved
+without clicking anything.
+
+Every row carries a **review checkbox**, at all three levels. Ticking a method marks it; ticking a
+file or folder marks everything beneath it in one request. Parents show a **partial** state when only
+some of their children are done — never rounded to done or not-done. The mark also appears on the
+node in the graph, so the tree and the graph cannot disagree about what you have read.
+
+A **stale** mark renders as its own state (amber `!`, not a tick), because `loadReviewed` reports a
+symbol that changed after review as `reviewed: false, stale: true`. A tick there would claim you had
+read code you have never seen.
+
+Selecting anything — a method row, or a node in the graph — **lights the whole trail**: the method, its
+file, and every folder containing it, with collapsed folders opened and the row scrolled into view.
+Knowing *where* you are is the point of having a hierarchy.
+
+Callers and tests are a different case. They are unchanged code, so most live in files this PR never
+touched and therefore have **no row in the tree** — on the measured PR, only 1 of 12. Clicking one and
+seeing nothing move would look like a broken click, so a crumb above the tree always names what is
+selected and says when it is context that the tree cannot hold.
 
 **2. Impact** — an **ego view**, not a whole-PR graph. Selecting a change lays out fixed lanes:
 
 ```
    TESTS        CALLED BY        THIS CHANGE        CALLS
-   (10)           (12)                              (2)
+   (10)            (2)                              (0)
 ```
 
 Positions are computed rather than force-simulated, so labels never collide and the picture is
 stable between selections. Click any node to re-centre on it. With nothing selected you get a
 file-level overview sized by risk. Red edges are broken calls, dashed blue are test coverage,
 dashed outlines are unchanged context pulled in for reach.
+
+**Each node is drawn once.** A test that calls the changed member emits both a `CALLS` and a
+`TEST_COVERS` edge; it belongs in TESTS, and `CALLED BY` is production reach only. Counting it in
+both made `CALLED BY · 12` out of two real callers and ten test methods. The overlap is stated
+rather than hidden — the subtitle reads `10 tests (10 calling)` — and the total resolved fan-in is
+still reported separately.
+
+**A context node is coloured by its break verdict**, not by change kind: red BROKEN, amber UPDATED,
+green SAFE, grey when unknown. This PR did not change those methods, so they have no change kind to
+show; what they have is a verdict, which is the most valuable fact in the view. Change kind and
+verdict share a palette, but CHANGED nodes are drawn with a solid stroke and CONTEXT nodes dashed, so
+dashed-green (SAFE) never reads as solid-green (ADDED). A `null` verdict stays grey — *unknown* must
+not be able to look like *safe*.
 
 **3. Change** — signature change first (parameter-level for long lists, so a 16-argument
 constructor shows `+ SessionClusterResolver` rather than two unreadable walls), then every call site

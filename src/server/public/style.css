@@ -95,30 +95,93 @@ nav, section { display: flex; flex-direction: column; min-width: 0; min-height: 
 
 /* ------------------------------------------------------- files + changes */
 #fileList { overflow: auto; flex: 1; }
-.file { border-bottom: 1px solid var(--line); }
-.fileHd {
-  display: flex; align-items: center; gap: 7px; padding: 7px 10px;
-  cursor: pointer; background: var(--panel);
+
+/* What is selected, stated above the tree so a click on a node with no row still gets an answer. */
+#treeCrumb {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2);
+  font-size: 10.5px;
 }
-.fileHd:hover { background: var(--panel-2); }
-.fileHd .caret { color: var(--faint); font-size: 10px; width: 8px; flex: none; }
-.fileHd .fname { font-weight: 600; font-size: 12.5px; }
-.fileHd .fdir { color: var(--faint); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+#treeCrumb .cLbl {
+  font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase;
+  padding: 0 4px; border-radius: 3px; background: var(--accent); color: #0b1020;
+}
+#treeCrumb.ctxSel .cLbl { background: var(--unknown); color: #1c1503; }
+#treeCrumb .cPath { font-family: ui-monospace, monospace; color: var(--fg); }
+#treeCrumb .cNote { color: var(--faint); flex: 1 0 100%; }
+
+/* Tree rows. `--d` is the depth; indentation is derived from it so nesting needs no extra markup. */
+.tRow {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  padding: 6px 10px 6px calc(8px + var(--d, 0) * 13px);
+}
+.tRow .caret { color: var(--faint); font-size: 10px; width: 8px; flex: none; }
+.tDir { background: var(--panel); }
+.tDir:hover { background: var(--panel-2); }
+.tDir .dirName {
+  font-size: 11.5px; color: var(--dim); flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+}
+.tFile { background: var(--panel); border-top: 1px solid var(--line); }
+.tFile:hover { background: var(--panel-2); }
+
+/* The trail to the selection. Deliberately quieter than `.unit.sel`: it says "the thing you are
+   looking at is in here", not "this is the thing". A folder gets a thin rail, the owning file a
+   brighter name, so the path reads at a glance without competing with the selected row. */
+.tRow.onPath { background: var(--panel-2); }
+.tDir.onPath { box-shadow: inset 2px 0 0 rgba(74,168,224,.45); }
+.tDir.onPath .dirName { color: var(--fg); }
+.tFile.onPath { box-shadow: inset 2px 0 0 var(--accent); }
+.tFile.onPath .fname { color: var(--accent); }
+/* A CONTEXT node (a caller or test) has no method row, so its file carries the selection outright. */
+.tFile.onPathOnly { box-shadow: inset 3px 0 0 var(--accent); }
+.tFile.onPathOnly .fname { color: #fff; }
+.tFile .fname { font-weight: 600; font-size: 12.5px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prog { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; flex: none; }
+
 .counts-mini { display: flex; gap: 5px; font-size: 10.5px; flex: none; }
 .counts-mini .a { color: var(--added); }
 .counts-mini .r { color: var(--removed); }
 .counts-mini .m { color: var(--modified); }
 
-.units { display: none; }
-.file.open .units { display: block; }
+/* The review mark. A real tri-state control: unchecked, all, or partial — partial is never rounded
+   to one of the other two, because "some of this folder" is the honest answer. */
+.revBox {
+  width: 13px; height: 13px; flex: none; border-radius: 3px; cursor: pointer;
+  border: 1.5px solid var(--faint); display: grid; place-items: center; box-sizing: border-box;
+}
+.revBox:hover { border-color: var(--accent); }
+.revBox.ckAll { background: var(--added); border-color: var(--added); }
+.revBox.ckAll::after { content: '✓'; font-size: 9px; font-weight: 900; color: #08130c; line-height: 1; }
+.revBox.ckSome { border-color: var(--added); }
+.revBox.ckSome::after { content: ''; width: 7px; height: 2px; background: var(--added); border-radius: 1px; }
+/* A stale mark is not a reviewed mark, and must not be able to pass for one. */
+.revBox.ckStale { border-color: var(--unknown) !important; background: transparent !important; }
+.revBox.ckStale::after { content: '!'; font-size: 9px; font-weight: 900; color: var(--unknown); }
+
+.units { display: block; }
 .unit {
-  display: grid; grid-template-columns: 16px 1fr auto; gap: 4px 7px;
-  padding: 5px 10px 5px 22px; cursor: pointer; border-top: 1px solid var(--line);
-  background: var(--panel-2);
+  display: grid; grid-template-columns: 13px 16px 1fr auto; gap: 4px 7px; align-items: center;
+  padding: 5px 10px 5px calc(8px + var(--d, 1) * 13px); cursor: pointer;
+  border-top: 1px solid var(--line); background: var(--panel-2);
 }
 .unit:hover { background: var(--panel-3); }
-.unit.sel { background: var(--panel-3); box-shadow: inset 3px 0 0 var(--accent); }
-.unit.done { opacity: .45; }
+/* The selected row has to be unmistakable at a glance in a list of near-identical rows: a thick
+   accent rail, a tinted wash that fades across the row, and a full outline. A slightly lighter
+   background alone was not distinguishable from the hover state. */
+.unit.sel {
+  background: linear-gradient(90deg, rgba(74,168,224,.24), rgba(74,168,224,.06));
+  box-shadow: inset 4px 0 0 var(--accent);
+  outline: 1px solid rgba(74,168,224,.5); outline-offset: -1px;
+  position: relative; z-index: 1;
+}
+.unit.sel .nm { color: #fff; font-weight: 700; }
+.unit.sel .owner { color: #b9c6d4; }
+/* Reviewed recedes, but stays readable. A stale row cannot also be `done` — loadReviewed reports
+   stale as reviewed:false — so it never recedes, and it carries its own edge to be findable. */
+.unit.done { opacity: .5; }
+.unit.stale { box-shadow: inset 2px 0 0 var(--unknown); }
+.unit.stale.sel { box-shadow: inset 3px 0 0 var(--accent), inset 5px 0 0 var(--unknown); }
 .unit .ck {
   font-size: 9.5px; font-weight: 800; width: 16px; height: 16px; border-radius: 4px;
   display: grid; place-items: center; flex: none;
@@ -127,9 +190,22 @@ nav, section { display: flex; flex-direction: column; min-width: 0; min-height: 
 .ck.REMOVED { color: #fff; background: var(--removed); }
 .ck.MODIFIED { color: #1c1503; background: var(--modified); }
 .ck.MOVED, .ck.RENAMED { color: #04121c; background: var(--moved); }
-.unit .nm { font-family: ui-monospace, monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Test method names run to 87 characters here. Truncating to one line left every row reading
+   `resetSession_…`, so the name may take a second line before it is clipped — two rows that differ
+   only in their suffix have to be tellable apart. */
+.unit .nm {
+  font-family: ui-monospace, monospace; font-size: 12px; line-height: 1.35;
+  overflow: hidden; word-break: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+}
 .unit .nm .owner { color: var(--faint); }
-.unit .meta { grid-column: 2 / 4; display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+/* The method name carries its own change kind, so the tree reads as a change map without decoding
+   the badge. The owner prefix and parameter list stay faint so the method name still leads. */
+.unit .nm.kADDED { color: var(--added); }
+.unit .nm.kREMOVED { color: var(--removed); }
+.unit .nm.kMODIFIED { color: var(--modified); }
+.unit .nm.kMOVED, .unit .nm.kRENAMED { color: var(--moved); }
+.unit .meta { grid-column: 3 / 5; display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
 .chip {
   font-size: 9.5px; padding: 0 4px; border-radius: 3px; border: 1px solid var(--line);
   color: var(--dim); white-space: nowrap;
@@ -173,7 +249,10 @@ nav, section { display: flex; flex-direction: column; min-width: 0; min-height: 
 .gNode.centre .name { fill: #fff; font-weight: 700; }
 .gNode.centre .owner { fill: var(--accent) !important; }
 .gNode.broken rect { stroke: var(--broken) !important; stroke-width: 2.5; }
-.gNode.reviewed { opacity: .5; }
+/* Reviewed nodes keep full opacity: faded already means CONTEXT here, and reusing it would make a
+   reviewed change indistinguishable from unchanged code pulled in for reach. */
+.gNode.reviewed rect { stroke-dasharray: none; }
+.gTick { font: 900 11px -apple-system, system-ui, sans-serif; fill: var(--added); }
 .gBadge { font: 700 8px ui-monospace, monospace; }
 .gHalo { fill: none; stroke: var(--accent); stroke-opacity: .35; stroke-width: 2; }
 
@@ -228,9 +307,11 @@ pre.diff {
   border-radius: 5px; overflow: auto; font-size: 11.5px; line-height: 1.55; max-height: 420px;
 }
 pre.diff div { padding: 0 8px; white-space: pre; }
-pre.diff .add { background: rgba(70,201,122,.13); color: var(--added); }
-pre.diff .del { background: rgba(239,95,109,.13); color: var(--removed); }
-pre.diff .ctx { color: var(--dim); }
+/* The changed lines of the selected method are the point of the view, so they carry a solid gutter
+   bar and a stronger wash; context recedes rather than competing with them. */
+pre.diff .add { background: rgba(70,201,122,.17); color: var(--added); box-shadow: inset 2px 0 0 var(--added); }
+pre.diff .del { background: rgba(239,95,109,.17); color: var(--removed); box-shadow: inset 2px 0 0 var(--removed); }
+pre.diff .ctx { color: var(--faint); }
 pre.diff .gap { color: var(--faint); background: var(--panel-3); font-style: italic; font-size: 10.5px; }
 pre.diff .ln { color: var(--faint); display: inline-block; width: 34px; text-align: right; margin-right: 8px; user-select: none; }
 

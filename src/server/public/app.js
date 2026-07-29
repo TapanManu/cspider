@@ -27,6 +27,10 @@ const COLOR = {
   ADDED: '#46c97a', REMOVED: '#ef5f6d', MODIFIED: '#e3b341',
   MOVED: '#4aa8e0', RENAMED: '#4aa8e0', UNCHANGED: '#4a5260',
 };
+// Break verdicts, for context nodes that have no change kind of their own. Grey stays the answer for
+// a null verdict: "we do not know" must not be able to look like "safe".
+const VERDICT_COLOR = { BROKEN: '#ef5f6d', UPDATED: '#e3b341', SAFE: '#46c97a' };
+
 const DELTA_CHIP = {
   SIGNATURE: ['sig', 'signature'], VISIBILITY: ['vis', 'visibility'],
   THROWS: ['thr', 'throws'], ANNOTATION: ['ann', 'annotation'],
@@ -38,6 +42,12 @@ const S = {
   // null means "not loaded yet", which must render differently from an empty list.
   threads: null, threadsError: null,
   allPrs: [],
+  // Tree disclosure. Folders are open unless explicitly closed; files track both directions so an
+  // auto-open default can still be overridden either way.
+  closedDirs: new Set(), openFiles: new Set(), closedFiles: new Set(),
+  // The selected node's file. A CONTEXT node has no change unit, so its path is the only way to
+  // locate it in the tree.
+  selectedPath: null, selectedName: null,
 };
 
 init().catch((e) => { $('#banners').innerHTML = banner('bad', 'Failed to load', esc(e.message)); });
@@ -60,7 +70,10 @@ async function init() {
   $('#filter').oninput = renderFiles;
   $('#showTests').onchange = () => (S.selected ? focus(S.selected) : null);
   splitter();
-  $('#overviewBtn').onclick = () => { S.selected = null; renderFiles(); overview(); };
+  $('#overviewBtn').onclick = () => {
+    S.selected = null; S.selectedPath = null; S.selectedName = null;
+    renderFiles(); overview();
+  };
   $('#markBtn').onclick = toggleReviewed;
   $('#draftsBtn').onclick = openDrawer;
   $('#drawerClose').onclick = () => { $('#drawer').hidden = true; };
@@ -75,6 +88,8 @@ async function init() {
 async function selectPr(prId) {
   S.prId = prId;
   S.selected = null;
+  S.selectedPath = null;
+  S.selectedName = null;
   S.threads = null;
   S.threadsError = null;
   S.pr = await api(`/api/pr/${encodeURIComponent(prId)}`);
@@ -128,6 +143,65 @@ function renderBanners() {
 }
 
 // ------------------------------------------------------- files + changes (left)
+/**
+ * The left pane is a directory tree, not a flat file list. A review is navigated the way the code is
+ * organised, so folders nest and each file carries its own changed methods.
+ *
+ * Runs of single-child directories are collapsed into one row (`main/java/org/sedai`). Six nested
+ * rows before reaching a file wastes the whole width of a 330px pane and hides the structure that
+ * the nesting was supposed to reveal.
+ */
+function buildTree(files) {
+  const root = { name: '', key: '', dirs: new Map(), files: [] };
+  for (const f of files) {
+    const parts = f.path.split('/');
+    const name = parts.pop();
+    let node = root;
+    for (const p of parts) {
+      const key = node.key ? `${node.key}/${p}` : p;
+      if (!node.dirs.has(p)) node.dirs.set(p, { name: p, key, dirs: new Map(), files: [] });
+      node = node.dirs.get(p);
+    }
+    node.files.push({ ...f, name });
+  }
+
+  const collapse = (d) => {
+    let { name } = d;
+    let cur = d;
+    while (cur.dirs.size === 1 && cur.files.length === 0) {
+      const only = [...cur.dirs.values()][0];
+      name = `${name}/${only.name}`;
+      cur = only;
+    }
+    const dirs = [...cur.dirs.values()].map(collapse);
+    const fileList = [...cur.files].sort((a, b) => b.broken - a.broken || b.risk - a.risk || a.name.localeCompare(b.name));
+    // Every unit beneath this folder, which is what its aggregate checkbox acts on.
+    const units = [...dirs.flatMap((x) => x.units), ...fileList.flatMap((x) => x.units)];
+    return { kind: 'dir', name, key: cur.key, dirs, files: fileList, units };
+  };
+
+  return {
+    dirs: [...root.dirs.values()].map(collapse),
+    files: [...root.files],
+  };
+}
+
+/** Aggregate review state for a set of units. `partial` is a state of its own, never rounded. */
+function aggregate(units) {
+  const total = units.length;
+  const done = units.filter((u) => u.reviewed).length;
+  const stale = units.filter((u) => u.stale).length;
+  return { total, done, stale, state: done === 0 ? 'none' : done === total ? 'all' : 'partial' };
+}
+
+const box = (agg, ids) => {
+  const cls = agg.state === 'all' ? 'ckAll' : agg.state === 'partial' ? 'ckSome' : '';
+  return `<span class="revBox ${cls}${agg.stale ? ' ckStale' : ''}" role="checkbox"
+    aria-checked="${agg.state === 'all' ? 'true' : agg.state === 'partial' ? 'mixed' : 'false'}"
+    data-ids="${esc(ids.join(','))}" data-next="${agg.state === 'all' ? 'false' : 'true'}"
+    title="${agg.stale ? `${agg.stale} mark(s) stale — the symbol changed after review` : 'mark reviewed'}"></span>`;
+};
+
 function renderFiles() {
   const q = $('#filter').value.trim().toLowerCase();
   const el = $('#fileList');
@@ -136,41 +210,91 @@ function renderFiles() {
     .filter((f) => f.units.length);
 
   $('#filesTitle').textContent = `Files (${files.length})`;
-  el.innerHTML = files.map((f) => {
-    const parts = f.path.split('/');
-    const name = parts.pop();
-    const open = files.length <= 12 || f.broken || q;
-    return `
-      <div class="file ${open ? 'open' : ''}" data-path="${esc(f.path)}">
-        <div class="fileHd">
-          <span class="caret">${open ? '▾' : '▸'}</span>
-          <span class="fname mono">${esc(name)}</span>
-          <span class="fdir">${esc(parts.slice(-2).join('/'))}</span>
-          <span class="counts-mini">
-            ${f.added ? `<span class="a">+${f.added}</span>` : ''}
-            ${f.removed ? `<span class="r">−${f.removed}</span>` : ''}
-            ${f.modified ? `<span class="m">~${f.modified}</span>` : ''}
-          </span>
-          ${f.broken ? `<span class="chip broken">${f.broken}✗</span>` : ''}
-          ${f.unknown ? `<span class="chip unknown">${f.unknown}?</span>` : ''}
-          <span class="risk">${f.reviewed}/${f.units.length}</span>
-        </div>
-        <div class="units">${f.units.map(unitRow).join('')}</div>
-      </div>`;
-  }).join('') || '<div class="emptyImpact">Nothing matches that filter.</div>';
+  if (!files.length) {
+    el.innerHTML = '<div class="emptyImpact">Nothing matches that filter.</div>';
+    return;
+  }
 
-  for (const hd of el.querySelectorAll('.fileHd')) {
-    hd.onclick = () => {
-      const f = hd.closest('.file');
-      f.classList.toggle('open');
-      f.querySelector('.caret').textContent = f.classList.contains('open') ? '▾' : '▸';
+  // A filter is a search: the matches must be visible without hunting for them.
+  const autoOpen = !!q || files.length <= 12;
+  const tree = buildTree(files);
+  const out = [];
+
+  const fileRow = (f, depth) => {
+    const agg = aggregate(f.units);
+    const open = S.openFiles.has(f.path) || (autoOpen && !S.closedFiles.has(f.path));
+    out.push(`
+      <div class="tRow tFile ${open ? 'open' : ''}" data-path="${esc(f.path)}" style="--d:${depth}">
+        <span class="caret">${open ? '▾' : '▸'}</span>
+        ${box(agg, f.units.map((u) => u.id))}
+        <span class="fname mono">${esc(f.name)}</span>
+        <span class="counts-mini">
+          ${f.added ? `<span class="a">+${f.added}</span>` : ''}
+          ${f.removed ? `<span class="r">−${f.removed}</span>` : ''}
+          ${f.modified ? `<span class="m">~${f.modified}</span>` : ''}
+        </span>
+        ${f.broken ? `<span class="chip broken">${f.broken}✗</span>` : ''}
+        ${f.unknown ? `<span class="chip unknown">${f.unknown}?</span>` : ''}
+        <span class="prog">${agg.done}/${agg.total}</span>
+      </div>`);
+    const base = f.name.replace(/\.[a-z]+$/i, '');
+    if (open) out.push(`<div class="units">${f.units.map((u) => unitRow(u, depth + 1, base)).join('')}</div>`);
+  };
+
+  const dirRow = (d, depth) => {
+    const agg = aggregate(d.units);
+    const open = !S.closedDirs.has(d.key);
+    out.push(`
+      <div class="tRow tDir ${open ? 'open' : ''}" data-dir="${esc(d.key)}" style="--d:${depth}">
+        <span class="caret">${open ? '▾' : '▸'}</span>
+        ${box(agg, d.units.map((u) => u.id))}
+        <span class="dirName">${esc(d.name)}</span>
+        <span class="prog">${agg.done}/${agg.total}</span>
+      </div>`);
+    if (!open) return;
+    for (const sub of d.dirs) dirRow(sub, depth + 1);
+    for (const f of d.files) fileRow(f, depth + 1);
+  };
+
+  for (const d of tree.dirs) dirRow(d, 0);
+  for (const f of tree.files) fileRow(f, 0);
+  el.innerHTML = out.join('');
+
+  for (const row of el.querySelectorAll('.tDir')) {
+    row.onclick = (e) => {
+      if (e.target.classList.contains('revBox')) return;
+      const k = row.dataset.dir;
+      if (S.closedDirs.has(k)) S.closedDirs.delete(k); else S.closedDirs.add(k);
+      renderFiles();
     };
   }
-  for (const row of el.querySelectorAll('.unit')) row.onclick = () => focus(row.dataset.id);
+  for (const row of el.querySelectorAll('.tFile')) {
+    row.onclick = (e) => {
+      if (e.target.classList.contains('revBox')) return;
+      const p = row.dataset.path;
+      if (row.classList.contains('open')) { S.openFiles.delete(p); S.closedFiles.add(p); }
+      else { S.openFiles.add(p); S.closedFiles.delete(p); }
+      renderFiles();
+    };
+  }
+  for (const row of el.querySelectorAll('.unit')) {
+    row.onclick = (e) => {
+      if (e.target.classList.contains('revBox')) return;
+      focus(row.dataset.id);
+    };
+  }
+  for (const b of el.querySelectorAll('.revBox')) {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      const ids = b.dataset.ids.split(',').filter(Boolean);
+      if (ids.length) await setReviewed(ids, b.dataset.next === 'true');
+    };
+  }
   if (S.selected) markSelectedRow(S.selected);
+  else renderCrumb(null);
 }
 
-function unitRow(u) {
+function unitRow(u, depth = 1, fileBase = null) {
   const chips = [];
   // The kind of change is visible without clicking — that was the biggest gap in v1.
   for (const t of u.deltaTypes) {
@@ -184,10 +308,20 @@ function unitRow(u) {
   if (u.unknown) chips.push('<span class="chip unknown">unknown</span>');
 
   const risk = u.risk ?? u.severity ?? 0;
+  // A stale mark is NOT a reviewed mark. Showing a plain tick for a symbol that changed after it was
+  // reviewed would tell the reviewer they had already read code they have never seen.
+  const agg = { total: 1, done: u.reviewed ? 1 : 0, stale: u.stale ? 1 : 0, state: u.reviewed ? 'all' : 'none' };
   return `
-    <div class="unit ${u.reviewed ? 'done' : ''}" data-id="${esc(u.id)}" title="${esc(u.fqn)}">
+    <div class="unit ${u.reviewed ? 'done' : ''} ${u.stale ? 'stale' : ''}" data-id="${esc(u.id)}"
+         style="--d:${depth}" title="${esc(u.fqn)}${u.stale ? ' — mark is stale, the symbol changed after review' : ''}">
+      ${box(agg, [u.id])}
       <span class="ck ${esc(u.changeKind)}">${esc(u.changeKind[0])}</span>
-      <span class="nm"><span class="owner">${esc(u.owner ?? '')}.</span>${esc(bare(u.name))}<span class="owner">(${esc(params(u.name))})</span></span>
+      <span class="nm k${esc(u.changeKind)}">${
+        // The owner is repeated on every row under a file that already names that class — 44 of 44
+        // on the measured PR — and at 19 characters it truncated away the method name, the only part
+        // that tells two rows apart. It is kept only where it differs, i.e. an inner class.
+        u.owner && u.owner !== fileBase ? `<span class="owner">${esc(u.owner)}.</span>` : ''
+      }${esc(bare(u.name))}<span class="owner">(${esc(params(u.name))})</span></span>
       <span class="right">
         <span class="riskbar ${risk >= 40 ? 'hi' : ''}"><i style="width:${Math.min(100, risk * 1.6)}%"></i></span>
         <span class="risk">${risk}</span>
@@ -196,10 +330,79 @@ function unitRow(u) {
     </div>`;
 }
 
+/**
+ * Selecting a change from the graph must reveal it in the tree, not merely mark a row that is
+ * collapsed out of sight. Ancestor folders and the owning file are opened first, then the row is
+ * scrolled into view — otherwise the two views silently disagree about where you are.
+ *
+ * The whole path is highlighted, not just the row: knowing *where* you are in the hierarchy is the
+ * point of having a hierarchy.
+ *
+ * A caller or test node is CONTEXT — it has no change unit, so no method row can exist for it. It
+ * still has a file, and if that file is part of the PR the trail is shown to it. Leaving the tree
+ * blank would make a graph click look like it had failed.
+ */
 function markSelectedRow(id) {
-  for (const r of $('#fileList').querySelectorAll('.unit')) r.classList.toggle('sel', r.dataset.id === id);
-  const sel = $('#fileList').querySelector('.unit.sel');
-  if (sel) { sel.closest('.file').classList.add('open'); sel.scrollIntoView({ block: 'nearest' }); }
+  const byUnit = S.files?.files?.find((f) => f.units.some((u) => u.id === id));
+  const owner = byUnit
+    ?? (S.selectedPath ? S.files?.files?.find((f) => f.path === S.selectedPath) : null);
+  if (owner) {
+    let changed = false;
+    // Any collapsed ancestor of the owning file, at any depth of the collapsed-chain keys.
+    for (const k of [...S.closedDirs]) {
+      if (owner.path === k || owner.path.startsWith(`${k}/`)) { S.closedDirs.delete(k); changed = true; }
+    }
+    if (S.closedFiles.has(owner.path)) { S.closedFiles.delete(owner.path); changed = true; }
+    if (!S.openFiles.has(owner.path)) { S.openFiles.add(owner.path); changed = true; }
+    if (changed) { renderFiles(); return; }   // renderFiles re-enters here once the row exists
+  }
+
+  const el = $('#fileList');
+  for (const r of el.querySelectorAll('.unit')) r.classList.toggle('sel', r.dataset.id === id);
+
+  // The trail: the owning file, and every folder that contains it.
+  const under = (dirKey) => !!owner && (owner.path === dirKey || owner.path.startsWith(`${dirKey}/`));
+  for (const r of el.querySelectorAll('.tFile')) {
+    r.classList.toggle('onPath', !!owner && r.dataset.path === owner.path);
+    // A context node's file is on the trail but holds no selected method of its own.
+    r.classList.toggle('onPathOnly', !!owner && !byUnit && r.dataset.path === owner.path);
+  }
+  for (const r of el.querySelectorAll('.tDir')) r.classList.toggle('onPath', under(r.dataset.dir));
+
+  // Scroll to the method when there is one, otherwise to the file that stands in for it.
+  (el.querySelector('.unit.sel') ?? el.querySelector('.tFile.onPath'))
+    ?.scrollIntoView({ block: 'nearest' });
+
+  renderCrumb(id, owner, !!byUnit);
+}
+
+/**
+ * The tree only contains files this PR changed, so most callers and tests have no row in it at all —
+ * on the measured PR, 1 of 12. Clicking one and seeing nothing move looks like a broken click, so the
+ * crumb states what is selected and, when it is not in the tree, why.
+ */
+function renderCrumb(id, owner, isUnit) {
+  const box = $('#treeCrumb');
+  if (!id) { box.hidden = true; box.innerHTML = ''; return; }
+  const name = S.selectedName ?? '';
+  box.hidden = false;
+  if (isUnit && owner) {
+    box.className = '';
+    box.innerHTML = `<span class="cLbl">in tree</span>
+      <span class="cPath">${esc(owner.path.split('/').slice(-1)[0])}</span>`;
+    return;
+  }
+  if (owner) {
+    box.className = 'ctxSel';
+    box.innerHTML = `<span class="cLbl">context</span>
+      <span class="cPath">${esc(name || owner.path.split('/').slice(-1)[0])}</span>
+      <span class="cNote">unchanged by this PR — its file is highlighted, but it has no method row</span>`;
+    return;
+  }
+  box.className = 'ctxSel';
+  box.innerHTML = `<span class="cLbl">context</span>
+    <span class="cPath">${esc(name || 'selected node')}</span>
+    <span class="cNote">this PR does not change its file, so it has no row in the tree</span>`;
 }
 
 // ------------------------------------------------- impact graph (SVG)
@@ -222,18 +425,31 @@ function svgNode(n, x, y, cls) {
     n.reviewed ? 'reviewed' : ''].filter(Boolean).join(' ');
   // Transparent fill with a coloured border: a solid block made the owner line unreadable, and an
   // outline reads as a state (added / modified / removed) rather than as decoration.
-  const col = n.origin === 'CONTEXT' ? '#5d6674' : (COLOR[n.changeKind] ?? '#5d6674');
+  //
+  // A CONTEXT node has no change kind — this PR did not touch it — so colouring it by change kind
+  // says nothing. What it does have is a break VERDICT, which is the most valuable fact in the view.
+  // Change kind and verdict share a palette, but CONTEXT nodes are drawn with a dashed stroke and
+  // CHANGED ones solid, so dashed-green (SAFE) never reads as solid-green (ADDED).
+  const col = n.origin === 'CONTEXT'
+    ? (VERDICT_COLOR[n.verdict] ?? '#5d6674')
+    : (COLOR[n.changeKind] ?? '#5d6674');
   const halo = cls === 'centre'
     ? `<rect class="gHalo" x="${x - 5}" y="${y - 5}" width="${NW + 10}" height="${NH + 10}" rx="9"/>` : '';
   const badge = n.origin === 'CONTEXT' ? '' :
     `<text class="gBadge" x="${x + NW - 9}" y="${y + 14}" text-anchor="end" fill="${col}">${svgEsc(n.changeKind[0])}</text>`;
+  // A reviewed change is still part of the change set, so it stays fully legible and gets an explicit
+  // tick. Dimming it would read as CONTEXT, which is already drawn faded and dashed.
+  const tick = n.reviewed ? `<text class="gTick" x="${x + NW - 9}" y="${y + NH - 7}" text-anchor="end">✓</text>` : '';
   return `<g class="${classes}" data-id="${svgEsc(n.id)}" tabindex="0">
     ${halo}
     <rect x="${x}" y="${y}" width="${NW}" height="${NH}" fill="${col}" fill-opacity="0.12" stroke="${col}"/>
     <text class="owner" x="${x + 9}" y="${y + 13}" fill="${col}">${svgEsc(clip(n.owner || '—', 24))}</text>
     <text class="name" x="${x + 9}" y="${y + 27}">${svgEsc(clip(bare(n.name), 23))}</text>
     ${badge}
-    <title>${svgEsc(n.fqn)}${n.unknown ? `\nUNKNOWN: ${svgEsc(n.unknown)}` : ''}</title>
+    ${tick}
+    <title>${svgEsc(n.fqn)}${n.verdict ? `\ncall site: ${svgEsc(n.verdict)}` : ''}${
+      n.role === 'test' && n.alsoCalls ? '\nalso a direct caller' : ''}${
+      n.reviewed ? '\nreviewed' : ''}${n.unknown ? `\nUNKNOWN: ${svgEsc(n.unknown)}` : ''}</title>
   </g>`;
 }
 
@@ -302,6 +518,9 @@ async function focus(id) {
   S.selected = id;
   S.mode = 'focus';
   $('#overviewBtn').classList.remove('on');
+  // A change unit resolves from what is already loaded; a CONTEXT node needs its path from the ego
+  // payload below, so the trail is drawn once now and refined once that arrives.
+  S.selectedPath = S.files?.files?.find((f) => f.units.some((u) => u.id === id))?.path ?? null;
   markSelectedRow(id);
   renderDetail(id);
 
@@ -313,12 +532,22 @@ async function focus(id) {
     return;
   }
 
+  // Now the centre's file is known, so a CONTEXT node can take its place on the trail too.
+  if (ego.centre && S.selected === id) {
+    S.selectedName = `${ego.centre.owner ? `${ego.centre.owner}.` : ''}${bare(ego.centre.name ?? '')}`;
+    if (!S.selectedPath && ego.centre.path) S.selectedPath = ego.centre.path;
+    markSelectedRow(id);
+  }
+
   const tests = $('#showTests').checked ? ego.tests : [];
   const c = ego.counts;
   $('#impactTitle').textContent = 'Impact — focus';
+  // `callers` is now production reach only. Tests that also call the member are counted in the test
+  // figure and named there, so the smaller caller count cannot read as lost reach.
   $('#impactSub').textContent =
     `${c.callers} caller${c.callers === 1 ? '' : 's'} · ${c.callees} callee${c.callees === 1 ? '' : 's'}` +
-    `${c.tests ? ` · ${c.tests} test${c.tests === 1 ? '' : 's'}` : ''}` +
+    `${c.tests ? ` · ${c.tests} test${c.tests === 1 ? '' : 's'}${
+      c.testCallers ? ` (${c.testCallers} calling)` : ''}` : ''}` +
     `${c.orphanSites ? ` · ${c.orphanSites} outside any member` : ''}` +
     `${c.fanInKind === 'INDIRECT' ? ' · fan-in indirect' : ''}`;
 
@@ -1003,18 +1232,33 @@ async function preview() {
 }
 
 // ------------------------------------------------------------------ reviewed
+/**
+ * One path for every review mark, whether it came from a method checkbox, a file, a whole folder, or
+ * the header button. The tree, the progress figure and the graph are all re-derived from the server's
+ * answer rather than patched in place, so they cannot drift out of agreement with the store.
+ */
+async function setReviewed(unitIds, reviewed) {
+  const r = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/reviewed`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ unitIds, reviewed }),
+  }).then((x) => x.json());
+  if (r.error) { alert(r.error); return; }
+  if (r.progress) { renderProgress(r.progress); S.pr.progress = r.progress; }
+  S.files = await api(`/api/pr/${encodeURIComponent(S.prId)}/files`);
+  renderFiles();
+  renderBanners();
+  if (unitIds.includes(S.selected)) {
+    $('#markBtn').textContent = reviewed ? 'unmark reviewed' : 'mark reviewed';
+  }
+  // The graph carries the same mark, so it has to be redrawn or it would contradict the tree.
+  if (S.mode === 'focus' && S.selected) await focus(S.selected);
+  else overview();
+}
+
 async function toggleReviewed() {
   if (!S.selected) return;
   const row = $('#fileList').querySelector(`.unit[data-id="${cssEsc(S.selected)}"]`);
-  const was = row?.classList.contains('done');
-  const r = await fetch(`/api/pr/${encodeURIComponent(S.prId)}/reviewed`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ unitId: S.selected, reviewed: !was }),
-  }).then((x) => x.json());
-  if (r.progress) { renderProgress(r.progress); S.pr.progress = r.progress; }
-  row?.classList.toggle('done', !was);
-  $('#markBtn').textContent = !was ? 'unmark reviewed' : 'mark reviewed';
-  S.files = await api(`/api/pr/${encodeURIComponent(S.prId)}/files`);
+  await setReviewed([S.selected], !row?.classList.contains('done'));
 }
 
 // Drag the divider between graph and detail; the graph re-fits automatically because the SVG

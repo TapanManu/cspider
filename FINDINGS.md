@@ -743,3 +743,88 @@ Worth noting how it surfaced. The existing suite never caught it because no test
 database a second time; the new cross-PR tests do, because two PRs in one store means opening it
 again. This is the F20 lesson recurring from the other side — the gap was in what the tests *set up*,
 not in what they asserted.
+
+## The tree, and review marks that propagate (8.10, 8.10a)
+
+The flat file list was the wrong shape. A reviewer navigates code the way it is organised, so the
+left pane is now a directory tree with each file carrying its own changed methods.
+
+**Single-child chains collapse into one row.** `backend/src/main/java/org/sedai/service/session/…`
+is six nested rows before the first file, in a 330px pane. Collapsing them (`main/java/org/sedai`)
+is what makes the nesting reveal structure rather than consume the width — the same choice GitHub's
+file tree makes, for the same reason.
+
+**One request per sweep, not one per unit.** A folder checkbox can cover 44 units. Marking them with
+44 requests would return 44 progress figures, 43 of them stale on arrival, and any failure midway
+would leave a state nobody could describe. `POST /reviewed` now takes `unitIds` and applies them in a
+transaction; a batch naming one bad id marks *nothing* and 404s. Verified: `done` stayed at 0.
+
+**Partial is a state, not a rounding.** A folder with 3 of 12 methods reviewed renders as partial, and
+`aggregate()` returns `none | all | partial` rather than a boolean. Rounding it either way would be a
+claim about work that has not been done.
+
+### Finding F22 — the reviewed signal was already there, and already ambiguous
+
+Reviewed nodes were rendered `opacity: .5`. But CONTEXT nodes — unchanged code pulled in for reach —
+are *also* drawn faded, and dashed. So a reviewed change looked like unchanged context: the same
+visual meaning two different things, in a graph whose entire job is distinguishing what changed from
+what did not.
+
+Reviewed nodes now keep full opacity and take an explicit tick. A reviewed change is still part of
+the change set and still needs to be legible; what changed is that it has been *read*, not that it
+matters less.
+
+The general trap: an existing rendering is not evidence of a working signal. This one had been
+shipped, was reachable, and conveyed almost nothing.
+
+### Finding F23 — the ego lanes drew the same node twice, and called it reach
+
+"Why are callers and tests not coloured?" turned out to have a boring answer and two real defects
+behind it.
+
+The boring answer: caller and test nodes carry `origin=CONTEXT, changeKind=UNCHANGED`, and colour in
+this graph encodes change kind. This PR did not change them, so there is no kind to show. Colouring
+them green would assert a change that does not exist.
+
+**Defect 1 — double-drawn nodes.** `callers` comes from `CALLS` edges and `tests` from `TEST_COVERS`.
+A test that calls the changed member emits both, and each list was deduped internally but never
+against the other. On `createDeploymentAndWait`: `CALLED BY · 12`, of which **10 were the very test
+methods already drawn in `TESTS · 10`**. Real production reach was two. Worse, the tests checkbox
+filtered only the TESTS lane, so unticking it left all ten test methods sitting under CALLED BY —
+a control that did not do what it said.
+
+Tests now appear once, in TESTS. `callers` is production reach. The overlap is reported
+(`counts.testCallers`) rather than quietly dropped, and total fan-in is still stated separately, so
+the smaller number cannot read as lost reach.
+
+Two things had to be carried across with them. A test routed out of `callers` loses the verdict that
+lived on its `CALLS` edge, so it would render grey — indistinguishable from *unknown*; the verdict is
+copied over. And `orphanSites` must keep matching against **every** caller, tests included, or a
+test's own call site gets reported as belonging to no member at all.
+
+**Defect 2 — the useful colour dimension was unused.** Every caller carries a break verdict, the
+highest-value fact in the view, and it was conveyed only by edge colour while node colour was spent
+on a change kind that is constant for context nodes. Context nodes are now coloured by verdict.
+`null` stays grey, because *unknown* must never be able to look like *safe*.
+
+**A test of mine was vacuous, and mutation testing caught it.** The orphan-site assertion passed
+whatever the code did, because the fixture's `centre.callers` never contained the test's call site.
+After adding it, reverting the match to production-callers-only makes the test fail — which is the
+only evidence that it tests anything. Written before that check, it was decoration.
+
+### Selection has to be answerable, including when the answer is "not here"
+
+Highlighting the selected row was not enough: the tree exists to show *where* code sits, so selecting
+anything now lights the whole trail — method, owning file, and every containing folder — with collapsed
+ancestors opened first. Verified against the real collapsed-chain keys: `SessionService.java` lights 4
+folders and leaves 8 alone; `SessionServiceTest.java` lights 2, because its chain is one collapsed row.
+
+The harder half is the graph. Every node is clickable and calls `focus()`, but callers and tests are
+CONTEXT — unchanged code — and the tree holds only files the PR changed. Measured on
+`createDeploymentAndWait`: **1 of 12** caller/test nodes had a file in the tree at all. So for eleven of
+them the correct trail is no trail, and the previous behaviour — clear every highlight, draw nothing —
+was indistinguishable from a click that failed.
+
+A crumb above the tree now always names the selection and, when it is context, says the PR does not
+change its file. The rule this is an instance of: a view that cannot answer a question must say so.
+Silence gets read as malfunction, and the reviewer starts distrusting the parts that do work.
