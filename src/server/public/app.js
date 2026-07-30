@@ -29,12 +29,18 @@ const COLOR = {
 };
 // Break verdicts, for context nodes that have no change kind of their own. Grey stays the answer for
 // a null verdict: "we do not know" must not be able to look like "safe".
-const VERDICT_COLOR = { BROKEN: '#ef5f6d', UPDATED: '#e3b341', SAFE: '#46c97a' };
+// TYPE_BROKEN shares BROKEN's red because both mean it does not compile. VALUE_CHANGED gets its own
+// colour: it is neither a break nor safe, and giving it either one would be the lie D3 exists to stop.
+const VERDICT_COLOR = {
+  BROKEN: '#ef5f6d', TYPE_BROKEN: '#ef5f6d', VALUE_CHANGED: '#c98cf0',
+  UPDATED: '#e3b341', SAFE: '#46c97a',
+};
 
 const DELTA_CHIP = {
   SIGNATURE: ['sig', 'signature'], VISIBILITY: ['vis', 'visibility'],
   THROWS: ['thr', 'throws'], ANNOTATION: ['ann', 'annotation'],
   MODIFIER: ['', 'modifier'], BODY: ['', 'body'],
+  INITIALIZER: ['val', 'value'],
 };
 
 const S = {
@@ -460,8 +466,11 @@ const svgEdge = (x1, y1, x2, y2, cls) => {
     marker-end="url(#arrow-${cls || 'plain'})"/>`;
 };
 
-const MARKERS = ['plain', 'broken', 'updated', 'test'].map((k) => {
-  const col = { plain: '#4a5464', broken: 'var(--broken)', updated: 'var(--added)', test: 'var(--moved)' }[k];
+const MARKERS = ['plain', 'broken', 'updated', 'test', 'write', 'undirected', 'valueChanged'].map((k) => {
+  const col = {
+    plain: '#4a5464', broken: 'var(--broken)', updated: 'var(--added)', test: 'var(--moved)',
+    write: 'var(--modified)', undirected: '#5d6674', valueChanged: '#c98cf0',
+  }[k];
   return `<marker id="arrow-${k}" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6"
     orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="${col}"/></marker>`;
 }).join('');
@@ -541,20 +550,38 @@ async function focus(id) {
 
   const tests = $('#showTests').checked ? ego.tests : [];
   const c = ego.counts;
+  const readers = ego.readers ?? [];
+  const writers = ego.writers ?? [];
+  const accessors = ego.accessors ?? [];
   $('#impactTitle').textContent = 'Impact — focus';
   // `callers` is now production reach only. Tests that also call the member are counted in the test
   // figure and named there, so the smaller caller count cannot read as lost reach.
-  $('#impactSub').textContent =
-    `${c.callers} caller${c.callers === 1 ? '' : 's'} · ${c.callees} callee${c.callees === 1 ? '' : 's'}` +
+  // A variable's inbound reach is reads and writes, not callers, so the summary says so instead of
+  // reporting "0 callers" for something with twelve readers.
+  const isVariable = readers.length || writers.length || accessors.length || ego.usageVerdicts;
+  $('#impactSub').textContent = (isVariable
+    ? `${readers.length} read by · ${writers.length} written by` +
+      `${accessors.length ? ` · ${accessors.length} access (direction unavailable)` : ''}`
+    : `${c.callers} caller${c.callers === 1 ? '' : 's'} · ${c.callees} callee${c.callees === 1 ? '' : 's'}`) +
     `${c.tests ? ` · ${c.tests} test${c.tests === 1 ? '' : 's'}${
       c.testCallers ? ` (${c.testCallers} calling)` : ''}` : ''}` +
     `${c.orphanSites ? ` · ${c.orphanSites} outside any member` : ''}` +
+    `${c.orphanUsages ? ` · ${c.orphanUsages} usage(s) outside any member` : ''}` +
     `${c.fanInKind === 'INDIRECT' ? ' · fan-in indirect' : ''}`;
 
-  // Lanes, left to right: tests, callers, this change, callees. Only populated lanes take space.
+  // Lanes, left to right: tests, callers/readers/writers, this change, callees. Only populated lanes
+  // take space. Reads and writes are separate lanes (D7): a write to a field believed read-only is
+  // the more interesting finding, and burying it among the reads is what loses it.
   const lanes = [];
   if (tests.length) lanes.push({ key: 'test', label: `TESTS · ${tests.length}`, items: tests });
-  lanes.push({ key: 'caller', label: `CALLED BY · ${ego.callers.length}`, items: ego.callers });
+  if (readers.length) lanes.push({ key: 'reader', label: `READ BY · ${readers.length}`, items: readers });
+  if (writers.length) lanes.push({ key: 'writer', label: `WRITTEN BY · ${writers.length}`, items: writers });
+  if (accessors.length) {
+    lanes.push({ key: 'accessor', label: `ACCESSED BY · ${accessors.length}`, items: accessors });
+  }
+  if (ego.callers.length || !isVariable) {
+    lanes.push({ key: 'caller', label: `CALLED BY · ${ego.callers.length}`, items: ego.callers });
+  }
   lanes.push({ key: 'centre', label: 'THIS CHANGE', items: [ego.centre] });
   if (ego.callees.length) lanes.push({ key: 'callee', label: `CALLS · ${ego.callees.length}`, items: ego.callees });
 
@@ -596,13 +623,26 @@ async function focus(id) {
     if (!p || !cp) continue;
     edges += svgEdge(p.cx, p.cy, cp.x, cp.cy, 'test');
   }
+  // Reads, writes and undirected accesses all point inward at the variable. A write is drawn
+  // distinctly from a read, per D7, so the two lanes are told apart at a glance and not only by label.
+  for (const [items, cls] of [[readers, ''], [writers, 'write'], [accessors, 'undirected']]) {
+    for (const n of items) {
+      const p = pos.get(n.id);
+      if (!p || !cp) continue;
+      const verdictCls = n.verdict === 'BROKEN' || n.verdict === 'TYPE_BROKEN' ? 'broken'
+        : n.verdict === 'VALUE_CHANGED' ? 'valueChanged'
+          : n.verdict === 'UPDATED' ? 'updated' : cls;
+      edges += svgEdge(p.cx, p.cy, cp.x, cp.cy, verdictCls || cls);
+    }
+  }
 
   paint(edges + inner, { x1: -12, y1: -40, x2: x - HGAP + NW + 12, y2: laneH + 8 });
 
   // "No resolved callers or callees" is a finding only if we looked. For a symbol that was never
   // resolved — every field today — it is the same false negative the UNKNOWN marker exists to end,
   // restated in a different pane (task 1.2).
-  if (!ego.callers.length && !ego.callees.length && !ego.tests.length) {
+  if (!ego.callers.length && !ego.callees.length && !ego.tests.length
+      && !readers.length && !writers.length && !accessors.length) {
     const why = ego.centre?.unknown;
     if (why) {
       $('#impactSub').textContent += ' — UNKNOWN, not empty';
@@ -652,13 +692,16 @@ async function renderDetail(id) {
   }
   out.push('</div>');
 
-  if (n.unknown) {
+  // A variable states its UNKNOWN inside the Usages section instead, where the reader is looking for
+  // the usage list — and where "unknown" and "none" have to be told apart (6.6).
+  const isVariable = n.kind === 'FIELD' || n.kind === 'ENUM_CONSTANT';
+  if (n.unknown && !isVariable) {
     out.push(`<div class="unknownBox"><b>UNKNOWN</b> — ${esc(n.unknown.reason ?? n.unknown)}
       <span class="sm">Not analysed. That is not the same as “no impact”.</span></div>`);
   }
 
   if (u?.binding) out.push(bindingHtml(u.binding));
-  if (n.usages) out.push(usagesHtml(n));
+  if (n.usages || isVariable) out.push(usagesHtml(n, u));
 
   const v = d.callerSummary;
   if (v && (v.BROKEN || v.UPDATED || v.SAFE)) {
@@ -753,58 +796,143 @@ async function renderDetail(id) {
   }
 
   el.innerHTML = out.join('');
+  // The section headings sit sticky below the title block, so they need its real height: it grows
+  // with a signature change or a delta row. Measured after the write, before any paint the user sees.
+  const stickH = el.querySelector('.stick')?.offsetHeight;
+  el.style.setProperty('--stickH', `${stickH ?? 56}px`);
+  // A fresh selection starts at the top. Without this the pane can keep a few pixels of the previous
+  // node's scroll offset, which is what left the first heading half-covered by the title block.
+  el.scrollTop = 0;
   wireCommentBoxes(el);
   wireDiffLines(el);
   wireThreads(el);
   if (u) wireShared(el, u.id);
 }
 
+// How a direction is drawn (6.3). UNKNOWN is a value, not a missing one, so it gets a label of its
+// own rather than the absence of a badge — an unlabelled row would read as a read.
+const DIRECTION_CHIP = {
+  READ: ['dirRead', 'read'],
+  WRITE: ['dirWrite', 'WRITE'],
+  BOTH: ['dirBoth', 'read + WRITE'],
+  UNKNOWN: ['dirUnknown', 'direction unknown'],
+};
+
 /**
- * A variable's resolved usages (tasks 2.2–2.5, and a first cut of 6.1).
+ * A variable's resolved usages (tasks 2.2–2.5, 6.1–6.3, 6.6, 6.7).
  *
- * Grouped by file, each site excerpted from the USING file and labelled with its enclosing member —
- * or explicitly as outside any member, which a read in a static initializer genuinely is.
- *
- * The banner about verdicts is load-bearing, not a caveat: direction and compatibility are group 4,
- * and a list of twelve usages with no verdicts must not be able to read as twelve safe usages.
+ * Grouped by file and then by enclosing member, each site excerpted from the USING file, carrying its
+ * direction, its verdict, and whether this PR touched it. A usage outside any member says so — a read
+ * in a static initializer genuinely has none, and dropping it would understate the reach.
  */
-function usagesHtml(n) {
+function usagesHtml(n, u) {
   const list = n.usages ?? [];
   const uv = n.usageVerdicts;
-  const out = [`<h4>Usages <span class="n">${list.length}${
-    list.some((x) => x.inDiff) ? ` · ${list.filter((x) => x.inDiff).length} in this PR` : ''}</span></h4>`];
+  const counts = uv?.counts ?? {};
+  const reads = (counts.READ ?? 0) + (counts.BOTH ?? 0);
+  const writes = (counts.WRITE ?? 0) + (counts.BOTH ?? 0);
 
-  if (uv && uv.available === false) {
-    out.push(`<div class="partialBox">⚠ <b>Direction and verdicts not computed</b> — ${esc(uv.reason)}.
-      <span class="sm">These are the resolved usage sites. None of them has been judged safe.</span></div>`);
+  // Reads and writes are counted separately in the heading, because "5 usages" hides the one fact a
+  // reviewer most wants first: whether anything writes to it.
+  const tally = [];
+  if (uv?.directionAvailable) {
+    tally.push(`${reads} read${reads === 1 ? '' : 's'}`, `${writes} write${writes === 1 ? '' : 's'}`);
+    if (counts.UNKNOWN) tally.push(`${counts.UNKNOWN} undetermined`);
+  } else {
+    tally.push(`${list.length} site${list.length === 1 ? '' : 's'}`);
   }
+  if (list.some((x) => x.inDiff)) tally.push(`${list.filter((x) => x.inDiff).length} in this PR`);
+
+  const out = [`<h4>Usages <span class="n">${esc(tally.join(' · '))}</span></h4>`];
+
+  // 6.6: UNKNOWN renders differently from empty, and always with its reason.
+  if (n.unknown) {
+    out.push(`<div class="partialBox">⚠ <b>UNKNOWN</b> — ${esc(n.unknown.reason ?? n.unknown)}.
+      <span class="sm">Nothing was ruled out here. This is not a report of zero usages.</span></div>`);
+    return out.join('');
+  }
+
+  // 4.4 / 6.1: the value change is stated once for the whole trace, with both values, rather than
+  // repeated on every row. Every usage below observes the new one.
+  const vc = uv?.valueChange;
+  if (vc) {
+    out.push(`<div class="valueBox"><b>value changed</b>
+      <code class="was">${esc(vc.before ?? '∅')}</code> → <code class="now">${esc(vc.after ?? '∅')}</code>
+      <span class="sm">Every usage below compiles and observes the new value. None of them is safe by
+      virtue of compiling.</span></div>`);
+  }
+  if (uv && uv.directionAvailable === false) {
+    out.push(`<div class="partialBox">⚠ <b>Direction unavailable</b> — ${esc(uv.directionReason)}.
+      <span class="sm">These sites access the variable. None is presented as a read.</span></div>`);
+  }
+  // F5b / 7.5: a short list must not be able to pass for a complete one.
+  if (uv?.reach && uv.reach.complete === false) {
+    out.push(`<div class="partialBox">⚠ <b>Partial reach</b> — ${esc(uv.reach.reason)}.</div>`);
+  }
+  if (n.usageNoise?.suppressed) {
+    out.push(`<div class="hintSm">${n.usageNoise.suppressed} low-signal write${
+      n.usageNoise.suppressed === 1 ? '' : 's'} suppressed (${esc(n.usageNoise.reasons.join(', '))}) — ${
+      esc(n.usageNoise.reversible)} to include them.</div>`);
+  }
+
   if (!list.length) {
     out.push('<div class="absent">No usages resolved. This symbol WAS looked up — that is what makes zero a finding.</div>');
     return out.join('');
   }
 
+  // Grouped by file, then by enclosing member within the file (6.1).
   const byFile = new Map();
   for (const x of list) {
-    if (!byFile.has(x.path)) byFile.set(x.path, []);
-    byFile.get(x.path).push(x);
+    if (!byFile.has(x.path)) byFile.set(x.path, new Map());
+    const key = x.member ?? ' outside';
+    const members = byFile.get(x.path);
+    if (!members.has(key)) members.set(key, []);
+    members.get(key).push(x);
   }
-  for (const [path, sites] of byFile) {
+
+  let i = -1;
+  for (const [path, members] of byFile) {
+    const total = [...members.values()].reduce((a, b) => a + b.length, 0);
     out.push(`<div class="useFile"><span class="mono">${esc(path.split('/').slice(-2).join('/'))}</span>
-      <span class="n">${sites.length}</span></div>`);
-    for (const x of sites) {
-      const lines = (x.excerpt?.lines ?? []).map((l) =>
-        `<div class="${l.isCallSite ? 'del' : 'ctx'}"><span class="ln">${l.line}</span>${esc(l.text)}</div>`).join('');
-      out.push(`<div class="site useSite">
-        <div class="hd">
-          <span class="loc">:${x.line}</span>
-          ${x.member ? `<span class="chip">in ${esc(bare(x.member))}</span>`
-            : '<span class="chip unknown">outside any member</span>'}
-          ${x.side === 'base' ? '<span class="note">base image</span>' : ''}
-          ${x.inDiff ? '<span class="chip">touched by this PR</span>' : ''}
-        </div>
-        ${x.excerpt?.absent ? '<div class="absent" style="padding:5px 7px">source unavailable at this revision</div>'
-          : `<pre class="diff">${lines}</pre>`}
-      </div>`);
+      <span class="n">${total}</span></div>`);
+    for (const [key, sites] of members) {
+      out.push(`<div class="useMember">${key === ' outside'
+        ? '<span class="chip unknown">outside any member</span>'
+        : `<span class="mono">${esc(bare(key))}</span>`}<span class="n">${sites.length}</span></div>`);
+      for (const x of sites) {
+        i++;
+        const aid = `u${i}`;
+        const [dcls, dlabel] = DIRECTION_CHIP[x.direction] ?? DIRECTION_CHIP.UNKNOWN;
+        const mine = draftsFor(x.path, x.line);
+        const lines = (x.excerpt?.lines ?? []).map((l) =>
+          // The excerpt comes from the USING file at the usage line (6.2); the marked line is the
+          // usage itself, not anything in the declaring file.
+          `<div class="${l.isCallSite ? 'del' : 'ctx'}"><span class="ln">${l.line}</span>${esc(l.text)}</div>`).join('');
+        out.push(`<div class="site useSite ${
+          x.verdict === 'BROKEN' || x.verdict === 'TYPE_BROKEN' ? 'brokenSite' : ''} ${
+          x.direction === 'WRITE' || x.direction === 'BOTH' ? 'writeSite' : ''} ${
+          mine.length ? 'hasDraft' : ''}">
+          <div class="hd">
+            <span class="dir ${dcls}" title="${esc(x.directionReason ?? '')}">${dlabel}</span>
+            ${x.verdict ? `<span class="v ${esc(x.verdict)}">${esc(x.verdict.replace('_', ' '))}</span>` : ''}
+            <span class="loc">:${x.line}</span>
+            ${x.viaAccessor ? `<span class="chip">via ${esc(x.viaAccessor)}()</span>` : ''}
+            ${x.side === 'base' ? '<span class="note">base image</span>' : ''}
+            ${x.inDiff ? '<span class="chip">touched by this PR</span>' : ''}
+            ${x.noise?.length ? `<span class="note">${esc(x.noise.join(', '))}</span>` : ''}
+            ${mine.length ? `<span class="draftMark">${mine.length} draft${mine.length === 1 ? '' : 's'}</span>` : ''}
+          </div>
+          ${x.excerpt?.absent ? '<div class="absent" style="padding:5px 7px">source unavailable at this revision</div>'
+            : `<pre class="diff">${lines}</pre>`}
+          ${x.reasons?.length ? `<div class="note" style="padding:0 7px 5px">${esc(x.reasons.join('; '))}</div>` : ''}
+          <div class="siteFoot">
+            <button data-comment="${aid}">comment</button>
+            <div class="spacer"></div>
+          </div>
+          ${commentBox(x.path, x.line, aid).replace('<div class="cmtBox"',
+            `<div class="cmtBox" data-path="${esc(x.path)}" data-line="${x.line}" data-side="${esc(x.side ?? 'head')}"`)}
+        </div>`);
+      }
     }
   }
   return out.join('');

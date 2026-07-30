@@ -920,3 +920,97 @@ Two disclosures were needed to keep the partial state honest:
 Also found: `enum_constant` is absent from the parser's node map, so enum constants are not change
 units at all and ENUM_CONSTANT resolution cannot be reached. Recorded as task 2.1a rather than
 counting 2.1 as fully done.
+
+## Direction, verdicts and the trace measured (3.x, 4.x, 6.x, 7.2, 7.3, 7.5)
+
+Re-run against `sedai-simulation-server#244` with the full group 3/4/6 path. All 7 field units resolve,
+22 usage sites, 20 access edges (16 READS_FIELD, 4 WRITES_FIELD, 1 ACCESSES_FIELD), no truncation.
+
+**7.2 confirmed.** `VclusterProperties.defaultVersion` reports **VALUE_CHANGED on all 9 usages** with
+both initializer values — `"1.35.0" → "1.35.5"` — and never SAFE. That is the verdict D3 was written
+for: every one of those 9 sites compiles, and every one now reads a different default. Its risk score
+went from null to **73**, which puts it near the top of the review order instead of nowhere in it.
+
+**7.3 confirmed.** All three REMOVED fields list their base-image readers rather than stating UNKNOWN —
+`DeploymentManagementService#reuseSession` (1), `SessionService#reuseSession` (2), `#resetCore` (1),
+every one `side: base`. This needed a fix in `cli.mjs`: `needsBase` only counted METHOD and
+CONSTRUCTOR, so a PR that removed *only* fields would never have started a base resolver and all three
+would have reported UNKNOWN — the branch that made 2.3 reachable was itself unreachable.
+
+### The classifier found two things the design did not anticipate
+
+The first run came back with **6 of `defaultVersion`'s 9 usages UNKNOWN**. Not a classifier failure —
+the position/source consistency check refusing to guess — but the reasons were the finding:
+
+1. **Five were Lombok accessors.** JDT resolves a call to a generated `setDefaultVersion(...)` back to
+   the *field*, so the position lands on `setDefaultVersion`, not `defaultVersion`. That is not a
+   disagreement, it is the reference arriving through its accessor — and it carries a direction: a
+   setter writes, a getter reads. Classifying them turned 6 UNKNOWN into **4 reads and 4 writes**.
+   Without this the field looked read-only, which is precisely the "write to a field you thought was
+   read-only" that D7 calls the more interesting finding. The match is exact (`set` + capitalised
+   name), because a loose prefix match would attribute `setFlagged`'s direction to `flag`.
+2. **One was a Javadoc `{@link #defaultVersion}`.** A real reference, genuinely neither a read nor a
+   write. It stays UNKNOWN — the vocabulary has no fifth value and inventing one would break the
+   declared capability contract — but the reason now says "documentation reference" rather than
+   "no identifier at the resolved position", which read as an internal fault.
+
+F5b's disclosure still stands and is still emitted: generated members are not *enumerated*, so a read
+that resolves only to the accessor and never to the field remains invisible. What changed is that the
+ones JDT does map back are now oriented instead of discarded.
+
+### Cache parity
+
+Fresh and cache-served runs were diffed field by field — directions, verdicts, counts, value change,
+reach and suppressed-noise count — and are byte-identical. Two things had to change for that to hold:
+a v6 migration for `usage_noise` (a filtered list that reloads without knowing it was filtered
+presents a partial list as the whole one), and **removing** `direction` from the edge payload. The
+edge TYPE already encodes it, and a second copy in a column the edges table does not have is exactly
+the fresh-vs-cached divergence F15 was about.
+
+### The cold run caught a bug the test suite could not
+
+Running PR 244 cold after group 6 landed printed `expanding d2 FAILED: Cannot read properties of
+undefined (reading 'start')` — and then **carried on and produced a complete-looking review**, because
+`cli.mjs` catches a resolve error and keeps the graph it already has. Blast-radius expansion had been
+failing on every cold run since the usage lanes were added.
+
+Cause: `variableUsageFrom` mints CONTEXT nodes with the same `ctx:<path>#<member>` id that
+`expandBlastRadius` uses, so the two paths meet on one node — but it omitted `range`, which expansion
+reads as `ctx.range.start` to resolve the next ring. Two id schemes that must not diverge, silently
+diverging.
+
+Fixed by building the node from the LSP symbol exactly as expansion does — `range`, `detail`-derived
+parameter signature, and `kind` from the symbol kind rather than a guess. Confirmed: expansion now
+completes with **72 context nodes at depth ≤ 2 and 189 CALLS edges**, where it previously produced
+none. `test/variable.test.mjs` now asserts every usage CONTEXT node carries a range *and* runs
+`expandBlastRadius` over the result, because asserting the field alone would not have caught this.
+
+Worth stating plainly: no unit test caught this, and the failure mode was a passing run with a quietly
+smaller graph. The measured-PR validation step is not ceremony.
+
+Timings from these runs, for the record: cold `--resolve --no-cache` **45s** wall (2 jdtls images,
+89 queries), cache-served `--resolve` **2.1s**, printing `graph from cache (99 nodes, 278 edges)`.
+
+## Still open: reported 10–20s before the UI is interactive
+
+Carried over from `TODO-NEXT.md`, which is deleted now that its other two items are done. This one is
+**not** resolved, and it is recorded here so it does not vanish with the file.
+
+Not reproduced. Measured on PR 244:
+
+| path | wall time | console line |
+|---|---|---|
+| `--resolve --no-cache` (cold, 2 jdtls images, 89 queries) | **45s** | `resolving … +base expanding d2` |
+| `--resolve` (cache-served) | **2.1s** | `graph from cache (99 nodes, 278 edges)` |
+
+Every endpoint is single-digit milliseconds except `/threads` at 1.1s, which is already fired
+non-blocking after first paint.
+
+**The blocker is a question for the reporter, not further investigation:** the exact command run, and
+whether the console said `graph from cache` or `resolving …`. That line decides between two mutually
+exclusive fixes — the re-resolve path in `cli.mjs:254-281`, or browser-side render work
+(`renderFiles()` rebuilding the whole tree on every toggle). Neither measured path is 10–20s, so the
+figure belongs to a state neither run reproduced.
+
+**Do not paginate on the current evidence.** It would add a bounded-result disclosure obligation in
+exchange for shaving milliseconds off calls already measured in single-digit milliseconds.

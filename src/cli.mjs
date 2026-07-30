@@ -82,6 +82,7 @@ options:
   --depth N         blast-radius depth (default 2, 0 disables expansion)
   --max-nodes N     total node ceiling for expansion (default 400)
   --max-symbols N   cap symbols resolved per PR (default 40)
+  --max-variables N cap fields and enum constants resolved per PR (default: --max-symbols)
   --reviewed <fqn>  mark matching change unit(s) reviewed (substring match) and exit
   --unreviewed <fqn> clear the reviewed mark for matching unit(s) and exit
   --progress        show review progress only
@@ -302,8 +303,12 @@ if (has('resolve')) {
 
     // A1: REMOVED members have no head-side position, so their callers need the BASE image.
     // Q1 measured indexing at 2–9s, which is what makes a second index affordable.
+    // A REMOVED variable needs the base image exactly as a removed member does, and for the sharper
+    // reason: three of the four non-test field changes in the measured PR are removals, and without a
+    // base image every one of them reports UNKNOWN instead of listing its surviving readers (2.3).
     const needsBase = !has('no-base') && a.units.some((u) => u.changeKind === 'REMOVED'
-      && (u.kind === 'METHOD' || u.kind === 'CONSTRUCTOR') && u.noise.length === 0);
+      && ['METHOD', 'CONSTRUCTOR', 'FIELD', 'ENUM_CONSTANT'].includes(u.kind)
+      && u.noise.length === 0);
     let baseResolver = null;
 
     try {
@@ -331,13 +336,19 @@ if (has('resolve')) {
 
       a.graph = await buildGraph(a, { head: resolver, base: baseResolver }, {
         maxSymbols: Number(flag('max-symbols', 40)),
+        maxVariables: Number(flag('max-variables', flag('max-symbols', 40))),
         buildRootPrefix: prefix,
         touchedHead: cl.head,
         touchedBase: cl.base,
         touchedSource: cl.source,
         queryBudget: Number(flag('query-budget', 400)),
+        showNoise: has('show-noise'),
       });
-      for (const n of a.graph.nodes.values()) if (n.callers) n.risk = scoreRisk(n);
+      // A variable has usages, not callers, and an unresolved variable has neither — but "no usage
+      // list" must not be scored as "no usages" (4.8), so it is scored too.
+      for (const n of a.graph.nodes.values()) {
+        if (n.callers || n.usages || n.usageVerdicts || n.unknown) n.risk = scoreRisk(n);
+      }
 
       // Task 6.3: expand the blast radius after break analysis, so the seeds already have callers.
       const depth = Number(flag('depth', 2));

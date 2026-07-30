@@ -207,6 +207,23 @@ export class JavaResolver {
       .map((r) => ({ path: this.#rel(r.uri), line: r.range.start.line + 1 }));
   }
 
+  /**
+   * The text of a file in THIS resolver's image, cached.
+   *
+   * Direction classification (3.1) needs the using file's source at the resolved offset, and which
+   * image that means is not a detail: a base-resolved usage of a removed field exists only at the
+   * merge base. Reading it through the resolver rather than from a path the caller assembles is what
+   * keeps the two images from being mixed — each resolver already holds exactly one project root.
+   */
+  sourceOf(relPath) {
+    if (this.sourceCache?.has(relPath)) return this.sourceCache.get(relPath);
+    const abs = join(this.projectRoot, relPath);
+    let text = null;
+    try { text = existsSync(abs) ? readFileSync(abs, 'utf8') : null; } catch { text = null; }
+    (this.sourceCache ??= new Map()).set(relPath, text);
+    return text;
+  }
+
   #rel(uri) {
     return fileURLToPath(uri).replace(`${this.projectRoot}/`, '');
   }

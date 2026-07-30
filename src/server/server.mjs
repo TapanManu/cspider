@@ -225,6 +225,29 @@ export function createApiServer({ cacheDir, dbPath, gh }) {
       const orphanSites = (centre.callers ?? []).filter((c) =>
         !callers.some((k) => k.via?.path === c.path && k.via?.line === c.line));
 
+      // Task 6.4 — READ BY and WRITTEN BY, from the access edges, in the same shape as `callers` so
+      // the lane layout needs no new machinery. A BOTH site produced both edges, so its member
+      // legitimately appears in both lanes; that is the finding, not a duplicate.
+      // The direction is read back off the edge type, which is the only place it is stored — see the
+      // note in build.mjs about not keeping a second copy the cache would drop.
+      const accessLane = (type, role, direction) => dedupeById(graph.edges
+        .filter((e) => e.type === type && e.to === centre.id && e.from && graph.nodes.has(e.from))
+        .map((e) => ({
+          ...brief(graph.nodes.get(e.from), role),
+          via: e.evidence?.[0] ?? null,
+          verdict: e.verdict ?? null,
+          direction,
+        })));
+      const readers = accessLane('READS_FIELD', 'reader', 'READ');
+      const writers = accessLane('WRITES_FIELD', 'writer', 'WRITE');
+      // An analyser that declares no direction produces these instead, and they must not be shown in
+      // the READ BY lane — an undirected access presented as a read is the thing 3.4 forbids.
+      const accessors = accessLane('ACCESSES_FIELD', 'accessor', 'UNKNOWN');
+
+      // A usage with no enclosing member has no `from`, so it can never be a lane node. It is still
+      // a real usage, and is reported here for the same reason `orphanSites` is.
+      const orphanUsages = (centre.usages ?? []).filter((x) => x.outsideMember);
+
       const outCallers = dedupeById(prodCallers);
       const outTests = dedupeById(tests);
       return {
@@ -233,10 +256,22 @@ export function createApiServer({ cacheDir, dbPath, gh }) {
         callees: dedupeById(callees),
         tests: outTests,
         orphanSites,
+        readers,
+        writers,
+        accessors,
+        orphanUsages,
+        // Carried through so the view can state UNKNOWN-with-reason and the direction disclosure
+        // without a second request (6.6).
+        usageVerdicts: centre.usageVerdicts ?? null,
+        usageNoise: centre.usageNoise ?? null,
         counts: {
           callers: outCallers.length,
           callees: dedupeById(callees).length,
           tests: outTests.length,
+          readers: readers.length,
+          writers: writers.length,
+          accessors: accessors.length,
+          orphanUsages: orphanUsages.length,
           // Stated separately so "2 callers" is never mistaken for the whole inbound picture.
           testCallers: outTests.filter((t) => t.alsoCalls).length,
           orphanSites: orphanSites.length,

@@ -24,6 +24,10 @@ const TYPE_NODES = new Set([
 const MEMBER_NODES = new Set([
   'method_declaration', 'constructor_declaration', 'field_declaration',
   'compact_constructor_declaration',
+  // Task 2.1a: an enum constant is a public static final member with references of its own — a
+  // switch arm, a lookup table, a serialised name. It was absent from this map, so ENUM_CONSTANT
+  // change units were never produced at all and the resolution path for them was unreachable.
+  'enum_constant',
 ]);
 const KIND_BY_NODE = {
   class_declaration: 'CLASS',
@@ -35,6 +39,7 @@ const KIND_BY_NODE = {
   constructor_declaration: 'CONSTRUCTOR',
   compact_constructor_declaration: 'CONSTRUCTOR',
   field_declaration: 'FIELD',
+  enum_constant: 'ENUM_CONSTANT',
 };
 const VISIBILITIES = ['public', 'protected', 'private'];
 
@@ -196,9 +201,43 @@ export function parseSymbols(source, path) {
           throws: [],
           body: sha(text(d, source).replace(/\s+/g, ' ')),
           bodySize: text(d, source).replace(/\s+/g, ' ').trim().length,
+          // The hash above can only say *that* the declarator changed. A verdict of VALUE_CHANGED has
+          // to show the reviewer `false → true`, so the initializer is kept as text (4.4).
+          initText: initializerOf(d, source),
           declText: declarationLine(node, source),
         });
       }
+      return;
+    }
+
+    // An enum constant's "initializer" is its constructor argument list: `TRIAL("trial", 14)`.
+    // Changing it changes what every reader of that constant observes, exactly as a field's
+    // initializer does, so it travels in the same slot (2.1a).
+    if (kind === 'ENUM_CONSTANT') {
+      const nameNode = node.childForFieldName('name');
+      if (!nameNode) return;
+      const simple = text(nameNode, source);
+      const args = node.childForFieldName('arguments');
+      symbols.push({
+        fqn: `${ownerFqn}#${simple}`,
+        simpleName: simple,
+        kind: 'ENUM_CONSTANT',
+        owner: ownerFqn,
+        path,
+        range: rangeOf(node),
+        selectionRange: rangeOf(nameNode),
+        signature: `${ownerFqn.split('.').pop()} ${simple}`,
+        // An enum constant carries no modifiers of its own: it is implicitly public static final,
+        // and reporting 'package-private' here would make every constant look narrower than it is.
+        visibility: 'public',
+        modifiers: ['static', 'final'],
+        annotations,
+        throws: [],
+        body: sha(text(node, source).replace(/\s+/g, ' ')),
+        bodySize: text(node, source).replace(/\s+/g, ' ').trim().length,
+        initText: args ? text(args, source).replace(/\s+/g, ' ').trim() : null,
+        declText: declarationLine(node, source),
+      });
       return;
     }
 
@@ -266,6 +305,13 @@ function typeSignature(node, src, simple) {
     if (c) parts.push(text(c, src).replace(/\s+/g, ''));
   }
   return parts.join(' ');
+}
+
+// The right-hand side of one declarator, whitespace-normalised. `null` for a declaration with no
+// initializer at all, which is a different fact from an initializer whose text is empty.
+function initializerOf(declarator, src) {
+  const v = declarator.childForFieldName('value');
+  return v ? text(v, src).replace(/\s+/g, ' ').trim() : null;
 }
 
 function declarationLine(node, src) {

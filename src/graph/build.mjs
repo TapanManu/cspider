@@ -8,10 +8,15 @@
 
 import { execFileSync } from 'node:child_process';
 import { signatureCompatibility, isTestSource, isPublicApi } from '../java/compat.mjs';
+import { classifyAccess, selfAssignmentNoise } from '../java/access.mjs';
+import { variableVerdict, valueChange } from '../java/variableCompat.mjs';
+import { JAVA_CAPABILITIES, classifiesDirection, accessEdgeTypes } from '../java/capabilities.mjs';
 
 export const VERDICTS = ['BROKEN', 'UNKNOWN', 'UPDATED', 'SAFE'];
 
 const TYPE_KINDS = new Set(['CLASS', 'INTERFACE', 'ENUM', 'RECORD', 'ANNOTATION_TYPE']);
+// The kinds resolved as variables: a name whose references are accesses rather than calls.
+const VARIABLE_KINDS = new Set(['FIELD', 'ENUM_CONSTANT']);
 
 /**
  * Why a change unit went unresolved. The reason has to distinguish *we looked and found nothing*
@@ -19,8 +24,8 @@ const TYPE_KINDS = new Set(['CLASS', 'INTERFACE', 'ENUM', 'RECORD', 'ANNOTATION_
  */
 export function unresolvedReason(u) {
   if (u.noise?.length) return 'suppressed as low-signal, so it was not resolved';
-  if (u.kind === 'FIELD') {
-    return 'field usages are not resolved yet — its readers and writers are unknown, not absent';
+  if (VARIABLE_KINDS.has(u.kind)) {
+    return 'usages were not resolved — its readers and writers are unknown, not absent';
   }
   if (TYPE_KINDS.has(u.kind)) {
     return 'type references are not resolved yet — its users are unknown, not absent';
@@ -41,6 +46,9 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
     touchedHead = new Map(), touchedBase = new Map(),
     touchedSource = 'none', depth = 2, queryBudget = 400,
     maxVariables = maxSymbols,
+    // Read through the same seam the plugin's own answer will arrive on in Phase B (3.3/3.4).
+    capabilities = JAVA_CAPABILITIES,
+    showNoise = false,
   } = opts;
 
   const nodes = new Map();
@@ -101,7 +109,7 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
   // reviewer who asked for 40 symbols would quietly get 33 of them plus 7 fields.
   const variables = analysis.units
     .filter((u) => u.noise.length === 0)
-    .filter((u) => u.kind === 'FIELD')
+    .filter((u) => VARIABLE_KINDS.has(u.kind))
     .sort((a, b) => b.severity.total - a.severity.total);
 
   const selectedVars = variables.slice(0, maxVariables);
@@ -247,14 +255,15 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
     node.break = { verdicts, detail, contractChange: describeContract(u, removed) };
   }
 
-  // ------------------------------------------------------------------ variables (tasks 2.2–2.5)
+  // ------------------------------------------------------------------ variables (2.2–2.5, 3.x, 4.x)
   //
-  // A field's usages are resolved exactly as a member's callers are, with three differences:
+  // A variable's usages are resolved as a member's callers are, with four differences:
   //   - no `implementations` query: a field cannot be overridden, so it costs one query, not two
   //   - each usage is attributed to its enclosing member, and a usage in a field initializer or a
   //     static block legitimately has none rather than being dropped (2.5)
-  //   - no verdicts. Compatibility for variables is group 4; until it exists this node says so,
-  //     because a usage list with no verdicts must not be able to read as a clean one.
+  //   - each usage is oriented — READ, WRITE, BOTH or UNKNOWN — from the using file's AST (3.1)
+  //   - each usage carries a verdict from the variable vocabulary, which is not the method one (4.3)
+  const directional = classifiesDirection(capabilities);
   let vBudget = varBudget;
   for (const u of selectedVars) {
     const node = nodes.get(u.id);
@@ -291,10 +300,18 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
     const sideMap = removed ? touchedBase : touchedHead;
     const side = removed ? 'base' : 'head';
     const sites = refs.filter((r) => !(strip(r.path) === rel && r.line === pos.line + 1));
+    const name = u.symbol.simpleName;
 
     const usages = [];
+    const memberAt = new Map();
     const seenFiles = new Set();
     for (const r of sites) {
+      // 4.1: an edge with no file-and-line evidence is discarded, not drawn from a guess. The
+      // omission is recorded so a shrunken usage list can never pass for a complete one.
+      if (!r.path || !r.line) {
+        truncations.push({ reason: 'evidenceLessReference', fqn: u.fqn, kind: u.kind });
+        continue;
+      }
       // documentSymbol is cached per file, so this costs one query per distinct file, not per usage.
       if (!seenFiles.has(r.path)) { seenFiles.add(r.path); vBudget--; }
       let member = null;
@@ -302,27 +319,144 @@ export async function buildGraph(analysis, resolvers, opts = {}) {
         member = await resolver.enclosingMember(r.path, r.line);
       } catch { member = null; }
       const full = unstrip(r.path);
-      usages.push({
+
+      // 3.1: direction comes from the using file's AST in the SAME image the position came from.
+      // Reading head source for a base-resolved position would classify against the wrong text.
+      const src = resolver.sourceOf?.(r.path) ?? null;
+      const access = directional
+        ? classifyAccess(src, r.line, r.character ?? 0, name)
+        : {
+            direction: 'UNKNOWN',
+            reason: `the ${capabilities?.language ?? 'analysing'} plugin does not declare read/write classification`,
+          };
+
+      const usage = {
         path: full,
         line: r.line,
         side,
         inDiff: sideMap.get(full)?.has(r.line) ?? false,
         member: member?.name ?? null,
+        memberKind: member ? (member.kind === 9 ? 'CONSTRUCTOR' : 'METHOD') : null,
         // A usage outside any method or constructor is a real usage with no enclosing member, and
         // has to say which of the two it is rather than being silently dropped (2.5).
         outsideMember: !member,
-      });
+        direction: access.direction,
+        directionReason: access.reason,
+        // Named when the reference arrived through a generated accessor rather than the field: the
+        // excerpt at that line shows `setFoo(...)`, and without this the row looks like a mismatch.
+        viaAccessor: access.viaAccessor ?? null,
+      };
+
+      // 4.9: `this.x = x` is a genuine WRITE that tells a reviewer nothing. It stays in the list,
+      // classified honestly and flagged, so the write count stays right and --show-noise can show it.
+      const noise = (usage.direction === 'WRITE' || usage.direction === 'BOTH')
+        ? selfAssignmentNoise(src, r.line, name) : null;
+      if (noise) usage.noise = [noise];
+
+      const v = variableVerdict(u, usage);
+      usage.verdict = v.verdict;
+      usage.reasons = v.reasons;
+      usages.push(usage);
+      // The LSP symbol is needed to build the edge's source node and is only in scope here. Kept
+      // beside the usage rather than on it, so nothing LSP-shaped ends up persisted in `usages`.
+      if (member) memberAt.set(`${usage.path}:${usage.line}`, member);
     }
 
-    node.usages = usages;
-    node.fanIn = { count: usages.length, kind: 'DIRECT', note: null };
-    node.testCovered = usages.some((c) => isTestSource(c.path));
-    // Group 4 owns READS_FIELD/WRITES_FIELD and the verdict vocabulary. Saying so here is what stops
-    // "12 usages, no verdicts" from being mistaken for "12 usages, all fine".
+    const shown = showNoise ? usages : usages.filter((x) => !x.noise?.length);
+    const suppressed = usages.length - shown.length;
+
+    node.usages = shown;
+    node.usageNoise = suppressed
+      ? { suppressed, reasons: ['constructor-parameter-assignment'], reversible: '--show-noise' }
+      : null;
+
+    // A site is one place in the code however many edges it creates, so BOTH counts once here (4.2).
+    const counts = { READ: 0, WRITE: 0, BOTH: 0, UNKNOWN: 0 };
+    const verdicts = {};
+    for (const x of shown) {
+      counts[x.direction] = (counts[x.direction] ?? 0) + 1;
+      verdicts[x.verdict] = (verdicts[x.verdict] ?? 0) + 1;
+    }
+
+    node.fanIn = { count: shown.length, kind: 'DIRECT', note: null };
+    node.testCovered = shown.some((c) => isTestSource(c.path));
     node.usageVerdicts = {
-      available: false,
-      reason: 'read/write direction and compatibility verdicts for variables are not implemented yet',
+      available: true,
+      directionAvailable: directional,
+      directionReason: directional ? null
+        : `the ${capabilities?.language ?? 'analysing'} plugin declares no read/write classification, so no usage is presented as a read`,
+      counts,
+      verdicts,
+      // Stated once for the whole trace rather than repeated per row (4.4).
+      valueChange: valueChange(u),
+      // F5b: a read that goes through a generated accessor resolves to the accessor, not the field,
+      // so it is absent from this list. That makes the reach partial, and a short list presented as
+      // complete is the same false negative this change exists to end.
+      reach: resolver.lombok?.uses
+        ? { complete: false, reason: 'accessors generated by an annotation processor are not enumerated, so reads through a generated getter are not in this list (F5b)' }
+        : { complete: true, reason: null },
     };
+
+    // 4.1/4.2: one edge per (direction, site), from the enclosing member to the variable.
+    for (const x of shown) {
+      const site = { path: x.path, line: x.line };
+      const from = variableUsageFrom(x, memberAt.get(`${x.path}:${x.line}`));
+      for (const type of accessEdgeTypes(x.direction, capabilities)) {
+        // Only the columns the edges table persists are set here. The direction is already carried by
+        // the edge TYPE, so storing it again would be a second copy that a cache-served run drops —
+        // the fresh-vs-cached divergence F15 is about.
+        addEdge(type, u.id, site, { from, verdict: x.verdict });
+      }
+      if (isTestSource(x.path)) addEdge('TEST_COVERS', u.id, site, { from });
+    }
+  }
+
+  /**
+   * The endpoint a usage edge comes from: the changed unit that contains it when there is one,
+   * otherwise a CONTEXT node for the enclosing member, created so the impact view has a real node to
+   * place in a READ BY / WRITTEN BY lane (6.4). A usage with no enclosing member yields no `from` — it
+   * is still listed in the trace, which is where a static initializer belongs.
+   *
+   * No extra LSP query: `enclosingMember` was already asked for this position.
+   *
+   * The node shape here must match `expandBlastRadius`'s exactly, because both use the same
+   * `ctx:<path>#<member>` id and so can meet on the same node. It found one first: expansion reads
+   * `ctx.range.start` to resolve the next ring, and a node created here without a `range` crashed the
+   * whole expansion — silently, because cli.mjs catches the resolve error and carries on with the
+   * graph it already had. Hence `range` and `detail` come straight off the LSP symbol.
+   */
+  function variableUsageFrom(x, member) {
+    if (!member) return null;
+    const simpleName = member.simpleName ?? member.name.split('.').pop();
+    const params = /\(([^)]*)\)/.exec(member.detail || '');
+    const sig = params ? `(${params[1].replace(/\s+/g, '')})` : '';
+    const existing = [...nodes.values()].find((n) =>
+      n.origin === 'CHANGED' && n.path === x.path && n.fqn.endsWith(`#${simpleName}${sig}`));
+    if (existing) return existing.id;
+
+    const id = `ctx:${x.path}#${member.name}`;
+    if (!nodes.has(id)) {
+      const owner = member.name.includes('.') ? member.name.split('.').slice(0, -1).join('.') : '';
+      nodes.set(id, {
+        id,
+        fqn: `${owner ? `${owner}#` : ''}${simpleName}${sig}`,
+        kind: member.kind === 9 ? 'CONSTRUCTOR' : 'METHOD',
+        path: x.path,
+        changeKind: 'UNCHANGED',
+        origin: 'CONTEXT',
+        depth: 1,
+        deltas: [],
+        severity: { total: 0, components: [] },
+        publicApi: false,
+        test: isTestSource(x.path),
+        callers: null,
+        break: null,
+        fanIn: null,
+        unknown: null,
+        range: member.range,
+      });
+    }
+    return id;
   }
 
   // A2: ambiguous overload sets that the differ deliberately left unpaired.
@@ -356,12 +490,44 @@ function describeContract(u, removed) {
 const fmt = (v) => (Array.isArray(v) ? (v.length ? v.join(' ') : '∅') : String(v ?? '∅'));
 
 // Task 6.8 — five change-derived components. Defect density excluded by default (R3).
+// Task 4.8 adds the variable components: field fan-in counts, writes weigh at least as much as
+// reads, and an UNKNOWN variable is never scored as low risk on the strength of a list it never got.
 export function scoreRisk(node) {
   const c = [];
   const add = (name, points, detail) => { if (points) c.push({ name, points, detail }); };
 
   const broken = node.break?.verdicts.BROKEN ?? 0;
   add('broken-call-sites', broken ? 30 : 0, broken ? `${broken} call site(s) not updated` : null);
+
+  const uv = node.usageVerdicts;
+  if (uv?.counts) {
+    const v = uv.verdicts ?? {};
+    const brokenUse = (v.BROKEN ?? 0) + (v.TYPE_BROKEN ?? 0);
+    add('broken-usages', brokenUse ? 30 : 0, brokenUse ? `${brokenUse} usage(s) not updated` : null);
+    // A changed default that compiles everywhere is the change most likely to reach production
+    // unnoticed, which is precisely why it carries points rather than being filed under body churn.
+    add('value-change', v.VALUE_CHANGED ? 20 : 0,
+      v.VALUE_CHANGED ? `${v.VALUE_CHANGED} usage(s) observe a changed value` : null);
+
+    // Writes weigh double. A write to a field you believed read-only is the more interesting finding,
+    // and BOTH is a write as well as a read.
+    const reads = (uv.counts.READ ?? 0) + (uv.counts.BOTH ?? 0);
+    const writes = (uv.counts.WRITE ?? 0) + (uv.counts.BOTH ?? 0);
+    const weighted = reads + writes * 2;
+    add('usage-fan-in', Math.min(15, Math.round(Math.log2(weighted + 1) * 4)),
+      `${reads} read(s), ${writes} write(s)${uv.counts.UNKNOWN ? `, ${uv.counts.UNKNOWN} undetermined` : ''}`);
+    if (uv.counts.UNKNOWN) {
+      add('undetermined-direction', 5, `${uv.counts.UNKNOWN} usage(s) could not be oriented`);
+    }
+    if (uv.reach && uv.reach.complete === false) {
+      add('partial-reach', 10, uv.reach.reason);
+    }
+  } else if (node.unknown && VARIABLE_KINDS.has(node.kind)) {
+    // The scenario this exists for: "an UNKNOWN field is not scored low risk because it has no known
+    // usages". Absence of a usage list is not evidence of absent usage, so it costs points, and the
+    // component names why rather than inflating an existing one.
+    add('unknown-usages', 20, node.unknown.reason);
+  }
   add('public-api-change',
     node.publicApi && node.deltas.some((d) => ['SIGNATURE', 'VISIBILITY'].includes(d.type)) ? 20 : 0);
 
@@ -370,7 +536,7 @@ export function scoreRisk(node) {
   add('fan-in', node.fanIn?.kind === 'INDIRECT' ? Math.round(fanPoints / 2) : fanPoints,
     `${fan} caller(s)${node.fanIn?.kind === 'INDIRECT' ? ' (indirect)' : ''}`);
 
-  if (!node.test && node.callers && !node.testCovered) {
+  if (!node.test && (node.callers || node.usages) && !node.testCovered) {
     add('no-test-coverage', 15, 'no test source reaches this symbol');
   }
   add('body-churn', node.deltas.some((d) => d.type === 'BODY') ? 10 : 0);

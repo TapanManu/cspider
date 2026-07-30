@@ -11,6 +11,9 @@ const DELTA_WEIGHT = {
   THROWS: 15,
   ANNOTATION: 15,
   MODIFIER: 10,
+  // A changed initializer compiles at every usage and changes what every usage observes. It ranks
+  // above body churn precisely because nothing else in a review flags it.
+  INITIALIZER: 20,
   BODY: 5,
 };
 const KIND_WEIGHT = { REMOVED: 25, MOVED: 10, RENAMED: 10, ADDED: 5, MODIFIED: 0 };

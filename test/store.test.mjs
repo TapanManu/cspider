@@ -419,5 +419,60 @@ t('variable usages and their verdict-availability survive the cache', () => {
   assert.equal(n.usageVerdicts.available, false, 'restoring usages without this would imply they are safe');
 });
 
+// One level down from the test above: the shown list is a FILTERED list, and the count of what was
+// filtered out is the only thing that makes filtering it legitimate (4.9). If that count is the part
+// that fails to persist, a cached run presents a partial list as the whole one.
+t('direction, verdicts and the suppressed-usage count all survive the cache', () => {
+  const db = fresh();
+  const units = unitsOf('void f() { g(1); }', 'void f() { g(2); }');
+  const usages = [
+    { path: 'src/main/java/com/acme/Reader.java', line: 42, side: 'head', inDiff: false,
+      member: 'Reader.read()', outsideMember: false, direction: 'READ', verdict: 'VALUE_CHANGED',
+      viaAccessor: 'getFlag', reasons: ['value changed: false → true'] },
+    { path: 'src/main/java/com/acme/Writer.java', line: 8, side: 'head', inDiff: false,
+      member: 'Writer.write()', outsideMember: false, direction: 'BOTH', verdict: 'BROKEN' },
+  ];
+  saveAnalysis(db, {
+    pr: { nwo: 'acme/svc', number: 1, repo: 'svc' },
+    meta: { headRefOid: 'head1', title: 'T', url: 'u' },
+    mergeBase: 'base1', buildRoots: { primary: '.' }, units,
+    graph: {
+      nodes: new Map(units.map((u) => [u.id, {
+        id: u.id, fqn: u.fqn, kind: u.kind, path: u.path, origin: 'CHANGED',
+        changeKind: u.changeKind, risk: null, fanIn: { count: 2, kind: 'DIRECT' },
+        break: null, unknown: null, usages,
+        usageVerdicts: {
+          available: true, directionAvailable: true,
+          counts: { READ: 1, WRITE: 0, BOTH: 1, UNKNOWN: 0 },
+          verdicts: { VALUE_CHANGED: 1, BROKEN: 1 },
+          valueChange: { before: 'false', after: 'true' },
+          reach: { complete: false, reason: 'generated accessors are not enumerated' },
+        },
+        usageNoise: { suppressed: 3, reasons: ['constructor-parameter-assignment'], reversible: '--show-noise' },
+      }])),
+      edges: [
+        { type: 'READS_FIELD', from: 'ctx:r', to: units[0].id, derivedFrom: 'LSP',
+          verdict: 'VALUE_CHANGED', evidence: [{ path: 'src/main/java/com/acme/Reader.java', line: 42 }] },
+        { type: 'WRITES_FIELD', from: 'ctx:w', to: units[0].id, derivedFrom: 'LSP',
+          verdict: 'BROKEN', evidence: [{ path: 'src/main/java/com/acme/Writer.java', line: 8 }] },
+      ],
+    },
+  });
+
+  const g = loadGraph(db, PR, 'head1');
+  const n = [...g.nodes.values()][0];
+  assert.equal(n.usages[0].direction, 'READ');
+  assert.equal(n.usages[1].direction, 'BOTH');
+  assert.equal(n.usages[0].verdict, 'VALUE_CHANGED');
+  assert.equal(n.usages[0].viaAccessor, 'getFlag');
+  assert.equal(n.usageVerdicts.valueChange.after, 'true');
+  assert.equal(n.usageVerdicts.reach.complete, false, 'a partial reach must not reload as complete');
+  assert.equal(n.usageNoise.suppressed, 3, 'a filtered list must reload knowing it was filtered');
+  // The lanes are built from the edge TYPE, so that is what has to survive — not a second copy of
+  // the direction stored alongside it.
+  assert.equal(g.edges.filter((e) => e.type === 'READS_FIELD').length, 1);
+  assert.equal(g.edges.filter((e) => e.type === 'WRITES_FIELD').length, 1);
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

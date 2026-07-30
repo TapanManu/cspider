@@ -304,6 +304,17 @@ h4 {
 }
 h4 .n { color: var(--faint); font-weight: 400; letter-spacing: 0; text-transform: none; }
 
+/* Section headings pin directly below the sticky title block instead of sliding under it. The title
+   block's height is not fixed — a signature change or a delta row makes it taller — so renderDetail
+   measures it and publishes --stickH; the fallback only matters for the frame before that lands.
+   This is deliberately on every #detail h4, not just Usages: Call sites, Diff, Conversation, Facts,
+   Deltas and Risk all share the pattern and were all clipped the same way. */
+#detail h4 {
+  position: sticky; top: var(--stickH, 56px); z-index: 4;
+  background: var(--panel); padding-top: 5px;
+  scroll-margin-top: calc(var(--stickH, 56px) + 8px);
+}
+
 .sigChange {
   background: var(--panel-2); border: 1px solid var(--modified); border-radius: 5px;
   padding: 7px 9px; font-family: ui-monospace, monospace; font-size: 11.5px; margin: 6px 0;
@@ -357,8 +368,55 @@ pre.diff .ln { color: var(--faint); display: inline-block; width: 34px; text-ali
   font-size: 11px; color: var(--dim);
 }
 .useFile .mono { font-family: ui-monospace, monospace; color: var(--fg); }
-.useSite { margin: 4px 0; }
+/* The member a run of usages sits in, indented under its file (6.1). */
+.useMember {
+  display: flex; gap: 7px; align-items: baseline; margin: 6px 0 3px 10px;
+  font-size: 10.5px; color: var(--faint);
+}
+.useMember .mono { font-family: ui-monospace, monospace; color: var(--dim); }
+.useSite { margin: 4px 0 4px 10px; }
 .useSite .hd { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* 6.3 — a write must be visibly distinct from a read, not merely labelled differently. The left
+   border carries it, so the distinction survives at a glance down a long list. */
+.useSite.writeSite { border-left: 3px solid var(--modified); }
+.dir {
+  font-size: 9.5px; font-weight: 800; letter-spacing: .3px; padding: 0 4px;
+  border-radius: 3px; flex: none; text-transform: uppercase;
+}
+.dir.dirRead { border: 1px solid var(--line); color: var(--dim); }
+.dir.dirWrite { background: var(--modified); color: #16120a; }
+/* BOTH is drawn as a write with a read outline: it is both, and picking one would be a choice the
+   analysis explicitly refused to make. */
+.dir.dirBoth { background: var(--modified); color: #16120a; box-shadow: inset 0 0 0 2px var(--panel-2); }
+.dir.dirUnknown { border: 1px dashed var(--unknown); color: var(--unknown); cursor: help; }
+
+.v.TYPE_BROKEN { background: var(--broken); color: #fff; }
+/* Neither red nor green. It compiles and it is not safe, and every palette choice here has to keep
+   those two facts from collapsing into each other. */
+.v.VALUE_CHANGED { background: #c98cf0; color: #1b1024; }
+.v.UNKNOWN { border: 1px dashed var(--unknown); color: var(--unknown); }
+
+/* The one change to a variable that applies to every usage at once (4.4). */
+.valueBox {
+  border: 1px solid #c98cf0; border-left-width: 3px; border-radius: 5px;
+  padding: 7px 9px; margin: 6px 0; background: rgba(201,140,240,.09); font-size: 11.5px;
+}
+.valueBox b { color: #c98cf0; text-transform: uppercase; font-size: 10px; letter-spacing: .6px; }
+.valueBox code { font-family: ui-monospace, monospace; font-size: 11.5px; }
+.valueBox code.was { color: var(--removed); }
+.valueBox code.now { color: var(--added); }
+.valueBox .sm { display: block; color: var(--faint); font-size: 10.5px; margin-top: 3px; }
+@media (prefers-color-scheme: light) {
+  .valueBox { background: #f7edff; }
+  .valueBox code.now { color: #0a7c3e; }
+}
+
+/* Write edges in the impact view are dashed so a WRITTEN BY lane is distinguishable from READ BY
+   without reading the labels. */
+.gEdge.write { stroke: var(--modified); stroke-dasharray: 5 3; }
+.gEdge.valueChanged { stroke: #c98cf0; }
+.gEdge.undirected { stroke: #5d6674; stroke-dasharray: 2 3; }
 /* A partial result announces itself. It is not a footnote to the list below it. */
 .partialBox {
   border: 1px solid var(--unknown); border-left-width: 3px; border-radius: 5px;

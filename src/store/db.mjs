@@ -155,6 +155,14 @@ const MIGRATIONS = [
   ALTER TABLE nodes ADD COLUMN usages TEXT;
   ALTER TABLE nodes ADD COLUMN usage_verdicts TEXT;
   `,
+  // v6 — the suppressed-usage disclosure (4.9).
+  //
+  // Same reasoning as v5, one level down. A cached run that restored the shown usages but not the
+  // count of suppressed ones would present a filtered list as the whole list — the disclosure is the
+  // only thing that makes the filtering legitimate, so it cannot be the part that fails to persist.
+  `
+  ALTER TABLE nodes ADD COLUMN usage_noise TEXT;
+  `,
 ];
 
 // Derived, never declared. A hand-maintained constant beside this array is a second source of

@@ -7,7 +7,7 @@
 ## 2. Field resolution
 
 - [x] 2.1 Widen the resolution target filter to include FIELD, keeping the existing severity ordering
-- [ ] 2.1a Extract enum constants as change units — `enum_constant` is absent from the parser's node map, so ENUM_CONSTANT resolution cannot be reached until the parser emits them
+- [x] 2.1a Extract enum constants as change units — `enum_constant` is absent from the parser's node map, so ENUM_CONSTANT resolution cannot be reached until the parser emits them
 - [x] 2.2 Resolve field references position-anchored against the head image
 - [x] 2.3 Resolve REMOVED fields against the base image; without one, UNKNOWN and never SAFE or zero (D4, A1)
 - [x] 2.4 Give fields their own share of the symbol budget so adding them cannot silently evict methods, and report per-kind omissions
@@ -16,24 +16,24 @@
 
 ## 3. Read/write classification (Java, in `src/java/`)
 
-- [ ] 3.1 Classify a reference position as READ, WRITE, BOTH, or UNKNOWN from the tree-sitter ancestor chain, with no default to READ (D2)
-- [ ] 3.2 Handle simple assignment, compound assignment, increment/decrement, and unresolvable syntax
-- [ ] 3.3 Declare READS_FIELD and WRITES_FIELD in the Java plugin's capabilities
-- [ ] 3.4 Report direction as unavailable for a plugin that does not declare it, rather than defaulting to read
-- [ ] 3.5 Test each classification against a fixture, including that an unresolvable site is UNKNOWN and is not counted as a read
+- [x] 3.1 Classify a reference position as READ, WRITE, BOTH, or UNKNOWN from the tree-sitter ancestor chain, with no default to READ (D2)
+- [x] 3.2 Handle simple assignment, compound assignment, increment/decrement, and unresolvable syntax
+- [x] 3.3 Declare READS_FIELD and WRITES_FIELD in the Java plugin's capabilities
+- [x] 3.4 Report direction as unavailable for a plugin that does not declare it, rather than defaulting to read
+- [x] 3.5 Test each classification against a fixture, including that an unresolvable site is UNKNOWN and is not counted as a read
 
 ## 4. Edges and verdicts
 
-- [ ] 4.1 Emit READS_FIELD and WRITES_FIELD edges with mandatory file-and-line evidence; discard and log evidence-less ones
-- [ ] 4.2 Emit both edges for a BOTH site while counting the site once in usage totals
-- [ ] 4.3 Implement the variable verdict vocabulary — BROKEN, TYPE_BROKEN, VALUE_CHANGED, UPDATED, SAFE, UNKNOWN (D3)
-- [ ] 4.4 Detect a changed initializer as VALUE_CHANGED across every usage, and never report it as SAFE
-- [ ] 4.5 Detect visibility narrowing that puts an existing usage out of scope, as BROKEN
-- [ ] 4.6 Detect an incompatible type change at a usage site, as TYPE_BROKEN
-- [ ] 4.7 Mark a usage inside this PR's diff as UPDATED
-- [ ] 4.8 Include field usage counts in risk, weighting writes at least as heavily as reads, and never scoring an UNKNOWN field as low risk
-- [ ] 4.9 Suppress `this.x = x` constructor assignments through the existing disclosed noise mechanism, reversible with `--show-noise`
-- [ ] 4.10 Test the verdict table exhaustively against a stub resolver, as break analysis is tested — a real PR cannot produce every verdict
+- [x] 4.1 Emit READS_FIELD and WRITES_FIELD edges with mandatory file-and-line evidence; discard and log evidence-less ones
+- [x] 4.2 Emit both edges for a BOTH site while counting the site once in usage totals
+- [x] 4.3 Implement the variable verdict vocabulary — BROKEN, TYPE_BROKEN, VALUE_CHANGED, UPDATED, SAFE, UNKNOWN (D3)
+- [x] 4.4 Detect a changed initializer as VALUE_CHANGED across every usage, and never report it as SAFE
+- [x] 4.5 Detect visibility narrowing that puts an existing usage out of scope, as BROKEN
+- [x] 4.6 Detect an incompatible type change at a usage site, as TYPE_BROKEN
+- [x] 4.7 Mark a usage inside this PR's diff as UPDATED
+- [x] 4.8 Include field usage counts in risk, weighting writes at least as heavily as reads, and never scoring an UNKNOWN field as low risk
+- [x] 4.9 Suppress `this.x = x` constructor assignments through the existing disclosed noise mechanism, reversible with `--show-noise`
+- [x] 4.10 Test the verdict table exhaustively against a stub resolver, as break analysis is tested — a real PR cannot produce every verdict
 
 ## 5. External bindings
 
@@ -45,18 +45,18 @@
 
 ## 6. The usage trace view
 
-- [ ] 6.1 Render the trace grouped by file and enclosing member, with direction, verdict, and an in-diff flag per site
-- [ ] 6.2 Take each excerpt from the using file at the usage line, not from the declaring file
-- [ ] 6.3 Distinguish reads from writes visibly, and label a BOTH site as both
-- [ ] 6.4 Add READ BY and WRITTEN BY lanes to the impact view, reusing the computed lane layout and the verdict colouring (D7, F23)
-- [ ] 6.5 Show the external-binding disclosure with the key named
-- [ ] 6.6 Render UNKNOWN distinctly from empty, with its reason, everywhere both can occur
-- [ ] 6.7 Let a usage site be commented on through the existing write path, with the side taken from the row as everywhere else (F19)
+- [x] 6.1 Render the trace grouped by file and enclosing member, with direction, verdict, and an in-diff flag per site
+- [x] 6.2 Take each excerpt from the using file at the usage line, not from the declaring file
+- [x] 6.3 Distinguish reads from writes visibly, and label a BOTH site as both
+- [x] 6.4 Add READ BY and WRITTEN BY lanes to the impact view, reusing the computed lane layout and the verdict colouring (D7, F23)
+- [x] 6.5 Show the external-binding disclosure with the key named
+- [x] 6.6 Render UNKNOWN distinctly from empty, with its reason, everywhere both can occur
+- [x] 6.7 Let a usage site be commented on through the existing write path, with the side taken from the row as everywhere else (F19)
 
 ## 7. Validation
 
 - [x] 7.1 Validate against `sedai-simulation-server#244`: all 7 field units resolve or state why not, and none reports zero usages without having been looked up
-- [ ] 7.2 Confirm `VclusterProperties.defaultVersion` reports VALUE_CHANGED with both initializer values, not SAFE
-- [ ] 7.3 Confirm the three REMOVED fields either list their base-image readers or state UNKNOWN with the missing-base reason
+- [x] 7.2 Confirm `VclusterProperties.defaultVersion` reports VALUE_CHANGED with both initializer values, not SAFE
+- [x] 7.3 Confirm the three REMOVED fields either list their base-image readers or state UNKNOWN with the missing-base reason
 - [x] 7.4 Measure the added resolution cost per field and record it in FINDINGS, so the budget split in 2.4 rests on a number
-- [ ] 7.5 Confirm a field whose accessors are Lombok-generated declares partial reach rather than presenting a short list as complete (F5b)
+- [x] 7.5 Confirm a field whose accessors are Lombok-generated declares partial reach rather than presenting a short list as complete (F5b)

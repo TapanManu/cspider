@@ -20,9 +20,13 @@ const P = 'src/main/java/com/acme/Svc.java';
 const wrap = (b) => `package com.acme;\n\npublic class Svc {\n${b}\n}\n`;
 const PRID = 'acme/svc#1';
 
-function seed(db, { truncated = [], health = null, resolved = true, lanes = false } = {}) {
-  const base = new Map([[P, parseSymbols(wrap('public void f(String s) { g(1); }'), P)]]);
-  const head = new Map([[P, parseSymbols(wrap('public void f(String s, int n) { g(1); }'), P)]]);
+function seed(db, { truncated = [], health = null, resolved = true, lanes = false, variable = false } = {}) {
+  // With `variable`, the change set also holds a field whose default flipped — the case the READ BY /
+  // WRITTEN BY lanes exist for (6.4).
+  const fieldBefore = variable ? 'private boolean flag = false;\n  ' : '';
+  const fieldAfter = variable ? 'private boolean flag = true;\n  ' : '';
+  const base = new Map([[P, parseSymbols(wrap(`${fieldBefore}public void f(String s) { g(1); }`), P)]]);
+  const head = new Map([[P, parseSymbols(wrap(`${fieldAfter}public void f(String s, int n) { g(1); }`), P)]]);
   const { units } = diffSymbols('acme/svc', base, head);
   for (const u of units) { u.severity = provisionalSeverity(u); u.noise = classifyNoise(u); }
   const m = units.find((u) => u.kind === 'METHOD');
@@ -60,6 +64,46 @@ function seed(db, { truncated = [], health = null, resolved = true, lanes = fals
     }
   }
 
+  // A field with one reader and one writer, each in its own unchanged member.
+  const field = variable ? units.find((u) => u.kind === 'FIELD') : null;
+  const accessEdges = [];
+  if (field) {
+    for (const [id, fqn, path] of [
+      ['ctx:reader', 'com.acme.Reader#reads()', 'src/main/java/com/acme/Reader.java'],
+      ['ctx:writer', 'com.acme.Writer#writes()', 'src/main/java/com/acme/Writer.java'],
+    ]) {
+      nodes.set(id, {
+        id, fqn, kind: 'METHOD', path, origin: 'CONTEXT', changeKind: 'UNCHANGED',
+        severity: null, risk: null, fanIn: null, callers: null, testCovered: false,
+        break: null, unknown: null,
+      });
+    }
+    const node = nodes.get(field.id);
+    node.usages = [
+      { path: 'src/main/java/com/acme/Reader.java', line: 9, side: 'head', inDiff: false,
+        member: 'Reader.reads', outsideMember: false, direction: 'READ', verdict: 'VALUE_CHANGED' },
+      { path: 'src/main/java/com/acme/Writer.java', line: 4, side: 'head', inDiff: false,
+        member: 'Writer.writes', outsideMember: false, direction: 'WRITE', verdict: 'VALUE_CHANGED' },
+      { path: 'src/main/java/com/acme/Boot.java', line: 3, side: 'head', inDiff: false,
+        member: null, outsideMember: true, direction: 'READ', verdict: 'VALUE_CHANGED' },
+    ];
+    node.usageVerdicts = {
+      available: true, directionAvailable: true,
+      counts: { READ: 2, WRITE: 1, BOTH: 0, UNKNOWN: 0 },
+      verdicts: { VALUE_CHANGED: 3 },
+      valueChange: { before: 'false', after: 'true' },
+      reach: { complete: true, reason: null },
+    };
+    accessEdges.push(
+      { type: 'READS_FIELD', from: 'ctx:reader', to: field.id, derivedFrom: 'LSP',
+        verdict: 'VALUE_CHANGED', direction: 'READ',
+        evidence: [{ path: 'src/main/java/com/acme/Reader.java', line: 9 }] },
+      { type: 'WRITES_FIELD', from: 'ctx:writer', to: field.id, derivedFrom: 'LSP',
+        verdict: 'VALUE_CHANGED', direction: 'WRITE',
+        evidence: [{ path: 'src/main/java/com/acme/Writer.java', line: 4 }] },
+    );
+  }
+
   const analysis = {
     pr: { nwo: 'acme/svc', number: 1, repo: 'svc' },
     meta: { headRefOid: 'h1', title: 'T', url: 'u' },
@@ -78,7 +122,7 @@ function seed(db, { truncated = [], health = null, resolved = true, lanes = fals
           evidence: [{ path: 'SvcTest.java', line: 7 }] },
         { type: 'TEST_COVERS', from: 'ctx:test', to: m.id, derivedFrom: 'LSP',
           evidence: [{ path: 'SvcTest.java', line: 7 }] },
-      ] : [])],
+      ] : []), ...accessEdges],
       blastRadius: { depth: 2, reachedDepth: 1, added: 1, maxNodes: 400, truncated, budgetLeft: 0 },
       truncations: truncated,
     } : null,
@@ -93,6 +137,8 @@ const boot = (opts) => {
   const seeded = seed(db, opts);
   return { server, db, seeded };
 };
+
+const fieldIdOf = (seeded) => seeded.units.find((u) => u.kind === 'FIELD').id;
 
 const call = (server, method, path, body) => new Promise((resolve, reject) => {
   server.listen(0, '127.0.0.1', async () => {
@@ -197,6 +243,30 @@ await t('routing tests out of callers does not orphan their call sites', async (
   // And the assertion is not vacuous: an unmatched site IS still reported.
   assert.ok(body.orphanSites.some((s) => s.path === 'A.java'),
     'a call site with no resolved caller node is still surfaced');
+});
+
+await t('a variable\'s ego separates READ BY from WRITTEN BY (6.4)', async () => {
+  const { server, seeded } = boot({ variable: true });
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/ego?id=${encodeURIComponent(fieldIdOf(seeded))}`);
+  assert.equal(body.readers.length, 1, JSON.stringify(body.counts));
+  assert.equal(body.writers.length, 1);
+  assert.equal(body.readers[0].fqn, 'com.acme.Reader#reads()');
+  assert.equal(body.writers[0].fqn, 'com.acme.Writer#writes()');
+  // The verdict travels with the node so the lane can colour it (F23).
+  assert.equal(body.writers[0].verdict, 'VALUE_CHANGED');
+  assert.equal(body.counts.readers, 1);
+  assert.equal(body.counts.writers, 1);
+  // A read is never reported in the WRITTEN BY lane, and vice versa.
+  assert.ok(!body.readers.some((r) => r.fqn.includes('Writer')));
+});
+
+await t('a usage with no enclosing member is reported, not silently dropped from the lanes', async () => {
+  const { server, seeded } = boot({ variable: true });
+  const { body } = await call(server, 'GET', `/api/pr/${ENC}/ego?id=${encodeURIComponent(fieldIdOf(seeded))}`);
+  // It can never be a lane node — it has no member to be one — so the count is how it stays visible.
+  assert.equal(body.counts.orphanUsages, 1, JSON.stringify(body.counts));
+  assert.equal(body.orphanUsages[0].path, 'src/main/java/com/acme/Boot.java');
+  assert.equal(body.usageVerdicts.valueChange.after, 'true', 'the value change reaches the view');
 });
 
 await t('files endpoint groups changes by file with per-kind counts', async () => {

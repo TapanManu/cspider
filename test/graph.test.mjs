@@ -347,14 +347,20 @@ await t('a resolved field with no usages is a finding, not an UNKNOWN', async ()
   assert.equal(field.fanIn.count, 0);
 });
 
-await t('a resolved field states that verdicts are still unavailable', async () => {
-  // Group 4 owns direction and compatibility. Until then a usage list must not read as a clean one.
+await t('a resolved field carries verdicts, and states its direction reach', async () => {
+  // Group 4 now owns direction and compatibility, so a usage list is no longer verdict-less. What
+  // must stay true is that nothing is asserted for free: this stub supplies no source, so direction
+  // is UNKNOWN with a reason rather than defaulting to READ.
   const a = withField(FLAG_BEFORE, FLAG_AFTER);
   const g = await buildGraph(a, stubResolver([{ path: CALLER_A, line: 10 }]), withLines());
   const field = fieldOf(g);
   assert.equal(field.usages.length, 1);
-  assert.equal(field.usageVerdicts.available, false);
-  assert.match(field.usageVerdicts.reason, /not implemented yet/);
+  assert.equal(field.usageVerdicts.available, true);
+  assert.equal(field.usages[0].direction, 'UNKNOWN');
+  assert.match(field.usages[0].directionReason, /source .* was not available/);
+  // The initializer went false → true, so every usage observes a different value.
+  assert.equal(field.usages[0].verdict, 'VALUE_CHANGED');
+  assert.deepEqual(field.usageVerdicts.valueChange, { before: 'false', after: 'true' });
 });
 
 await t('each usage carries its file, line, in-diff flag and enclosing member', async () => {
